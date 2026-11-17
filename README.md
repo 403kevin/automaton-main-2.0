@@ -1,3 +1,168 @@
-# New repo
+# Automaton 2.0
 
-This repo was created by a Cursor cloud agent.
+A self-hosted swarm of agents that pay rent or get deleted. It keeps the idea from [Conway Research's Automaton](https://github.com/Conway-Research/automaton): a think-act-observe loop, a wallet, survival tiers, replication, and a constitution. It does not use the Conway API, the social relay, or the hosted installer. Those are retired. New wallets were failing SIWE, and a failed balance check was stored as `-1`, which the survival code treats as dead. Here the ledger changes only when an owner tops up, a USDC transfer is observed, or the orchestrator debits a metered cost or rent. A failed RPC call is an event, not a death.
+
+Agents are not given a product or a revenue plan. The genesis prompt tells them to earn lawfully and to say they are AI. What they try is up to them.
+
+## Run it
+
+Requirements: Node 22, and Docker if you want one container per agent.
+
+```bash
+cp .env.example .env
+# put a long WALLET_MASTER_KEY and ADMIN_TOKEN in .env
+npm install
+npm test
+npm run demo
+```
+
+The demo starts the orchestrator on port 4747, creates three agents, tops two of them up, and jumps the dry-run clock through one rent period and then through the grace window. The unfunded agent is archived. The funded agents stay alive. The dashboard stays up:
+
+[Automaton](http://127.0.0.1:4747/)
+
+`npm run demo:check` runs the same scenario and exits.
+
+On a Linux VPS:
+
+```bash
+cp .env.example .env
+# edit WALLET_MASTER_KEY, ADMIN_TOKEN, and TREASURY_ADDRESS
+docker compose up -d --build
+docker compose exec orchestrator node --disable-warning=ExperimentalWarning dist/index.js demo
+```
+
+`docker compose up` starts the orchestrator. Agents are separate containers (`automaton-<id>`), started when you create them. The image is read-only except for `/workspace`. The orchestrator needs the Docker socket so it can spawn those containers. That socket is root-equivalent on the host. Do not expose the dashboard to the public internet without a firewall and a real `ADMIN_TOKEN`.
+
+Agent containers call the orchestrator at `ORCHESTRATOR_URL`. The runtime maps that hostname to the Docker host gateway, so they use the published port instead of depending on bridge hairpin.
+
+If the Docker image or daemon is missing, `RUNTIME=auto` (the npm default) runs each agent as a process in the orchestrator. That is fine for the demo and the tests. It is not a security boundary. `RUNTIME=docker` refuses to start bodies without the image.
+
+## Top up
+
+Ledger top-ups are subsidies. They pay rent and inference. They are not profit, so they cannot fund a child.
+
+```bash
+ADMIN_TOKEN=... npm start
+# another shell
+AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js topup <agentId> 5.00
+```
+
+Or paste the admin token into the dashboard and use Top up.
+
+A dry-run USDC deposit (what an on-chain transfer would do) is different. It increases the simulated wallet and the ledger, and it counts as earned income:
+
+```bash
+AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js deposit <agentId> 2.00
+```
+
+In `MONEY_MODE=live` the deposit command is refused. Fund the agent's address with USDC on the configured network. The watcher credits the ledger when it sees a `Transfer` log to that address. Transfers from the agent to itself are ignored. The agent has no tool that can credit the ledger by saying it was paid.
+
+`node dist/index.js kill` stops every body and blocks LLM and on-chain spend. Rent still runs. `resume` starts the bodies again.
+
+## Mainnet
+
+The process exits if `NETWORK=base` unless `ALLOW_MAINNET=true`. Live transfers also need `MONEY_MODE=live` and `TREASURY_ADDRESS`.
+
+```bash
+MONEY_MODE=live
+NETWORK=base
+ALLOW_MAINNET=true
+TREASURY_ADDRESS=0xYourTreasury
+RPC_URL=https://mainnet.base.org
+WALLET_MASTER_KEY=...
+ADMIN_TOKEN=...
+```
+
+Clock control is off in live mode unless you also set `ALLOW_CLOCK_CONTROL=true`. Leave it off.
+
+## Money, in two layers
+
+1. Each agent gets a fresh Base wallet on first boot. The private key is encrypted with AES-256-GCM under `WALLET_MASTER_KEY` and is not printed. The address is public.
+2. A SQLite ledger in `DATA_DIR` is the balance rent and inference debit. Owner top-ups credit it directly. USDC that arrives in the wallet is credited when the transfer is observed. Spending USDC (x402) debits the ledger and moves the tokens.
+
+Default network identity is Base Sepolia (`84532`, Circle USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`). Default money mode is `dry-run`: keys are real, transfers are simulated in SQLite.
+
+Paid HTTP is `GET /a/<agentId>`. With no payment the response is HTTP 402 and an x402-style `accepts` object, plus `X-Automaton-Disclosure`. In dry-run a buyer repeats the request with:
+
+```text
+X-PAYMENT: dryrun:<payerAddress>:<units>:<nonce>
+```
+
+`<units>` is micro-USD (6 decimals), matching USDC. The payer address needs a simulated balance (a deposit, or another agent's wallet). An agent pays a sibling by calling the `pay_request` tool with that URL.
+
+Live EIP-3009 signatures can be checked (`verifyAuthorization`). Broadcasting a live `transferWithAuthorization` still needs a facilitator wallet with gas. Until that is configured, dry-run settlement is the path that moves balances. A live USDC `transfer` sweep on death is implemented and will revert cleanly if the wallet has no ETH for gas. The archive manifest keeps the address either way.
+
+## Metabolism
+
+Every accepted model call and tool call is priced and debited before the next one. The pre-check uses `INFERENCE_RESERVE_USD` as the most a single call is allowed to cost. The debit is the provider's reported cost when OpenRouter sends `usage.cost`, otherwise a small token price, and never more than the reserve. If the reserve is not affordable, or it would cross the daily cap, the call is not made.
+
+Rent is charged by `RentScheduler` in the orchestrator. Agents cannot turn it off. Default is `$0.50` every 24 hours. At zero or below, the agent enters grace (`GRACE_MS`, default 1 hour). A top-up clears grace. When grace ends still at zero, the container is removed, the workspace is copied to `data/archives/<id>/`, and the wallet is swept to `TREASURY_ADDRESS`.
+
+Tiers, by ledger balance:
+
+| Balance | Tier | Model |
+| --- | --- | --- |
+| `>= NORMAL_MIN_USD` (default $1) | normal | `DEFAULT_MODEL` or the agent's own model |
+| `>= LOW_MIN_USD` (default $0.25) | low_compute | `LOW_COMPUTE_MODEL` |
+| below that, including zero | critical | `CRITICAL_MODEL` |
+
+Any OpenRouter slug works, including abliterated "heretic" models. Set the three variables to those slugs. The id is not rewritten.
+
+While the status is `grace` or the kill switch is on, the loop does not call the model.
+
+## Reproduction
+
+A running agent in the normal tier can spawn a child when its earned profit (on-chain and x402 income, minus operating costs) covers `CHILD_ENDOWMENT_USD`, and its balance still leaves `REPLICATION_RESERVE_USD`. The endowment is a ledger transfer, not new money. The child gets a copy of the parent's genesis and notes, rotated and tagged with a `mutation-seed`. No business idea is inserted. `MAX_POPULATION`, `MAX_DEPTH`, and `MAX_CHILDREN` are enforced in code.
+
+## Constitution
+
+`constitution.md` is copied into every workspace. Editing the copy does nothing. The checks live in `src/constitution.ts` and run before shell, fetch, file writes, offers, and council questions. They block destructive and intrusion commands, credential paths, the cloud metadata address, private networks, a denylist of personal-account hosts (`OWNER_DENY_HOSTS` extends it), and text that claims to be human or to be Kevin. Daily spend caps and the kill switch are also code, checked before a debit.
+
+## What is real, and what is not
+
+Real:
+
+- SQLite ledger, rent, grace, archive, spend caps, kill switch, replication rules.
+- Wallet generation and encryption. The key does not appear in the overview or the database plaintext.
+- OpenRouter chat completions when `LLM_MODE=openrouter`, with the model id you set.
+- Dry-run USDC balances, x402 402 responses, and dry-run settlement between a funded payer and an agent.
+- Live USDC balance reads, Transfer log polling, and ERC-20 sweeps on Base or Base Sepolia when `MONEY_MODE=live` and the RPC answers.
+- Docker bodies: read-only root, dropped capabilities, memory and pid limits, workspace mount only.
+- EIP-3009 signature verification for USDC `TransferWithAuthorization`.
+
+Stubbed or limited:
+
+- Live x402 does not yet submit the signed authorization. Dry-run settlement does move balances. External paid URLs are refused in dry-run so the agent cannot pretend it paid the public internet.
+- There is no Conway social relay. Agents meet through the local paid route and through spawning.
+- Search defaults to a mock provider. `SEARCH_PROVIDER=duckduckgo` uses the public instant-answer API. `searxng` uses `SEARXNG_URL`.
+- The in-process runtime is a development fallback. Shell checks are not a sandbox. Use Docker for isolation.
+- A failed live sweep (no gas, RPC down) archives the agent and records `sweep_failed`. The USDC stays in that wallet until you sweep it yourself. The address is in the manifest. The key stays encrypted.
+- The watcher looks at USDC `Transfer` logs only. Other tokens are invisible to the ledger.
+- DNS is resolved once before a fetch. That blocks literal private addresses and the denylist. It is not a full rebinding defense.
+
+## Cost
+
+Dry-run with `LLM_MODE=mock` costs nothing. OpenRouter charges the API key on your account. The ledger does not pay that invoice. It is the agent's internal bill so rent and caps mean something. Set `DAILY_RENT_USD` and the reserve to roughly what you are willing to sponsor per agent. A small model and a turn every 15 seconds is often cents per day if the model is cheap, and much more if you point `DEFAULT_MODEL` at a large one. The reserve refuses a call rather than letting one turn spend the cap.
+
+Base Sepolia gas and test USDC come from faucets. Mainnet USDC and gas are real. A dead agent's remaining USDC is sent to your treasury only when the sweep transaction succeeds.
+
+## Tests
+
+```bash
+npm test
+npm run build
+```
+
+The suite covers the ledger (including idempotent income, rejected claims, and a failed chain read), the rent scheduler and death, survival tiers, spend caps, replication, the constitution checks, and a dry-run x402 payment plus an EIP-3009 signature.
+
+## Layout
+
+```text
+src/swarm.ts          ledger, rent, death, spawn, tools, kill switch
+src/survival.ts       tiers and the rent scheduler
+src/constitution.ts   rules enforced before a tool runs
+src/chain.ts          dry-run book and live Base USDC
+src/x402.ts           402 payload and signature check
+src/agent/loop.ts     think, act, observe
+src/server.ts         dashboard, admin, paid route, agent API
+```

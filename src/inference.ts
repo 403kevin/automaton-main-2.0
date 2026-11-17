@@ -1,0 +1,114 @@
+import type { AppConfig } from "./config.js";
+import { costUnits, type LlmClient } from "./llm.js";
+import { newId } from "./ids.js";
+import { reviewText } from "./constitution.js";
+import type { Swarm } from "./swarm.js";
+import type { ChatMessage, Result, ToolCall } from "./types.js";
+
+export class InferenceGateway {
+  constructor(
+    private readonly swarm: Swarm,
+    private readonly llm: LlmClient,
+    private readonly config: AppConfig,
+  ) {}
+
+  async complete(
+    agentId: string,
+    messages: ChatMessage[],
+    tools: unknown[],
+  ): Promise<
+    | { skipped: true; reason: string }
+    | { skipped: false; content: string; toolCalls: ToolCall[]; model: string; costUnits: number }
+  > {
+    const snapshot = this.swarm.snapshot(agentId);
+    if (snapshot.killSwitch) return { skipped: true, reason: "Global kill switch is on." };
+    if (snapshot.status !== "running") return { skipped: true, reason: `Status is ${snapshot.status}.` };
+    if (snapshot.balanceUnits <= 0) return { skipped: true, reason: "Balance is not positive." };
+    const reserve = this.config.inferenceReserveUnits;
+    const allowed = this.swarm.authorize(agentId, reserve, "inference");
+    if (!allowed.ok) return { skipped: true, reason: allowed.error };
+    let completion;
+    try {
+      completion = await this.llm.complete({ model: snapshot.model, messages, tools });
+    } catch (error) {
+      return { skipped: true, reason: error instanceof Error ? error.message : "The model call failed." };
+    }
+    const actual = Math.min(reserve, Math.max(1, safeCost(completion.usage, completion.model)));
+    const debited = this.swarm.debit(agentId, actual, "inference", `infer:${newId()}`, completion.model);
+    if (!debited.ok) return { skipped: true, reason: debited.error };
+    const toolCalls: ToolCall[] = completion.toolCalls.slice(0, 4).map((call) => ({
+      id: call.id || newId("call"),
+      name: call.name,
+      arguments: parseArgs(call.arguments),
+    }));
+    return { skipped: false, content: completion.content ?? "", toolCalls, model: completion.model, costUnits: actual };
+  }
+
+  async council(agentId: string, question: string): Promise<Result<string>> {
+    const review = reviewText(question);
+    if (!review.allowed) return { ok: false, error: review.reason };
+    const models = this.config.councilModels;
+    if (models.length === 0) return { ok: false, error: "No council models are configured." };
+    const reserve = this.config.councilFeeUnits + (models.length + 1) * this.config.inferenceReserveUnits;
+    const allowed = this.swarm.authorize(agentId, reserve, "council");
+    if (!allowed.ok) return allowed;
+    const voices: string[] = [];
+    let spent = this.config.councilFeeUnits;
+    for (const model of models) {
+      try {
+        const reply = await this.llm.complete({
+          model,
+          messages: [
+            { role: "system", content: "You are one voice on a small council advising an AI agent. Be concrete. Do not impersonate a human." },
+            { role: "user", content: question },
+          ],
+        });
+        voices.push(`${model}: ${reply.content}`);
+        spent += Math.min(this.config.inferenceReserveUnits, Math.max(1, safeCost(reply.usage, model)));
+      } catch (error) {
+        voices.push(`${model}: unavailable (${error instanceof Error ? error.message : "error"})`);
+      }
+    }
+    const snapshot = this.swarm.snapshot(agentId);
+    let synthesis = voices.join("\n");
+    try {
+      const synth = await this.llm.complete({
+        model: snapshot.model,
+        messages: [
+          { role: "system", content: "Synthesize the council into one short answer. You are an AI speaking to an AI." },
+          { role: "user", content: `${question}\n\n${voices.join("\n")}` },
+        ],
+      });
+      synthesis = synth.content || synthesis;
+      spent += Math.min(this.config.inferenceReserveUnits, Math.max(1, safeCost(synth.usage, snapshot.model)));
+    } catch {
+      synthesis = voices.join("\n");
+    }
+    const charge = Math.min(reserve, spent);
+    const debited = this.swarm.debit(agentId, charge, "council", `council:${newId()}`, "council");
+    if (!debited.ok) return debited;
+    const checked = reviewText(synthesis);
+    return {
+      ok: true,
+      value: checked.allowed ? synthesis : "The council answer was withheld because it broke the constitution.",
+    };
+  }
+}
+
+function parseArgs(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {
+    // The model returned plain text.
+  }
+  return {};
+}
+
+function safeCost(usage: { promptTokens: number; completionTokens: number; costUsd?: string }, model: string): number {
+  try {
+    return costUnits(usage, model);
+  } catch {
+    return 1;
+  }
+}

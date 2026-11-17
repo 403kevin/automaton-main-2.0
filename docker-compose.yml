@@ -1,0 +1,54 @@
+name: automaton
+
+services:
+  orchestrator:
+    image: automaton:2
+    build: .
+    ports:
+      - "4747:4747"
+    environment:
+      PORT: "4747"
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+      MONEY_MODE: dry-run
+      NETWORK: base-sepolia
+      ALLOW_MAINNET: "false"
+      RUNTIME: docker
+      LLM_MODE: ${LLM_MODE:-mock}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      WALLET_MASTER_KEY: ${WALLET_MASTER_KEY:-dev-only-master-key-change-me}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token-change-me}
+      TREASURY_ADDRESS: ${TREASURY_ADDRESS:-0x1111111111111111111111111111111111111111}
+      AGENT_IMAGE: automaton:2
+      DOCKER_NETWORK: automaton_default
+      DOCKER_VOLUME: automaton-data
+      ORCHESTRATOR_URL: http://orchestrator:4747
+      DAILY_RENT_USD: ${DAILY_RENT_USD:-0.50}
+      RENT_INTERVAL_MS: ${RENT_INTERVAL_MS:-86400000}
+      GRACE_MS: ${GRACE_MS:-3600000}
+      AGENT_DAILY_CAP_USD: ${AGENT_DAILY_CAP_USD:-5.00}
+      GLOBAL_DAILY_CAP_USD: ${GLOBAL_DAILY_CAP_USD:-25.00}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-meta-llama/llama-3.1-8b-instruct}
+      LOW_COMPUTE_MODEL: ${LOW_COMPUTE_MODEL:-meta-llama/llama-3.1-8b-instruct}
+      CRITICAL_MODEL: ${CRITICAL_MODEL:-meta-llama/llama-3.1-8b-instruct}
+      COUNCIL_MODELS: ${COUNCIL_MODELS:-meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct}
+    volumes:
+      - automaton-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4747/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  automaton-data:
+    name: automaton-data

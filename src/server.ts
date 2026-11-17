@@ -1,0 +1,196 @@
+import { timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AppConfig } from "./config.js";
+import { dashboardHtml } from "./dashboard.js";
+import type { DirectHost } from "./host.js";
+import { parseUsd } from "./money.js";
+import { paymentRequirements } from "./x402.js";
+import type { Swarm } from "./swarm.js";
+import { redact } from "./redact.js";
+import type { ChatMessage, ToolCall } from "./types.js";
+
+export interface ServerHandle {
+  url: string;
+  close(): Promise<void>;
+}
+
+export function startServer(input: { config: AppConfig; swarm: Swarm; host: DirectHost }): Promise<ServerHandle> {
+  const { config, swarm, host } = input;
+  const server = createServer((req, res) => {
+    void handle(req, res, config, swarm, host).catch((error) => {
+      const message = redact(error instanceof Error ? error.message : "Request failed.");
+      send(res, 500, { error: message });
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(config.port, config.host, () => {
+      swarm.startScheduler();
+      void swarm.resumeLiving();
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : config.port;
+      const hostName = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
+      resolve({
+        url: `http://${hostName}:${port}`,
+        close: () =>
+          new Promise((done, fail) => {
+            void swarm.haltBodies().finally(() => {
+              server.closeAllConnections();
+              server.close((error) => (error ? fail(error) : done()));
+            });
+          }),
+      });
+    });
+  });
+}
+
+async function handle(req: IncomingMessage, res: ServerResponse, config: AppConfig, swarm: Swarm, host: DirectHost): Promise<void> {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const path = url.pathname;
+  if (req.method === "GET" && path === "/health") return send(res, 200, { ok: true });
+  if (req.method === "GET" && path === "/") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff" });
+    res.end(dashboardHtml());
+    return;
+  }
+  if (req.method === "GET" && path === "/api/overview") return send(res, 200, swarm.overview());
+
+  const paid = /^\/a\/(a[a-f0-9]+)\/?$/.exec(path);
+  if (paid && (req.method === "GET" || req.method === "POST")) return servePaid(req, res, config, swarm, paid[1]);
+
+  if (path.startsWith("/admin/")) {
+    if (!adminOk(req, config.adminToken)) return send(res, 401, { error: "Admin token rejected." });
+    const body = await readJson(req);
+    if (req.method === "POST" && path === "/admin/agents") {
+      const created = await swarm.createAgent({
+        name: String(body.name ?? ""),
+        genesisPrompt: body.genesisPrompt ? String(body.genesisPrompt) : undefined,
+        model: body.model ? String(body.model) : undefined,
+        lowModel: body.lowModel ? String(body.lowModel) : undefined,
+        criticalModel: body.criticalModel ? String(body.criticalModel) : undefined,
+      });
+      if (!created.ok) return send(res, 400, { error: created.error });
+      return send(res, 201, { id: created.value.id, name: created.value.name, address: created.value.address, depth: created.value.depth });
+    }
+    if (req.method === "POST" && path === "/admin/topup") {
+      const topped = swarm.ownerTopup(String(body.agentId ?? ""), parseUsd(String(body.usd ?? "")), body.ref ? String(body.ref) : undefined);
+      if (!topped.ok) return send(res, 400, { error: topped.error });
+      return send(res, 200, topped.value);
+    }
+    if (req.method === "POST" && path === "/admin/kill-switch") {
+      await swarm.setKillSwitch(Boolean(body.enabled));
+      return send(res, 200, { killSwitch: swarm.isKilled() });
+    }
+    if (req.method === "POST" && path === "/admin/clock") {
+      const advanced = await swarm.advance(Number(body.advanceMs ?? 0));
+      if (!advanced.ok) return send(res, 400, { error: advanced.error });
+      return send(res, 200, advanced.value);
+    }
+    if (req.method === "POST" && path === "/admin/simulate-transfer") {
+      const from = String(body.from ?? "0x2222222222222222222222222222222222222222");
+      const tx = String(body.txHash ?? `sim-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      const result = await swarm.simulateTransfer(String(body.agentId ?? ""), from, parseUsd(String(body.usd ?? "")), tx);
+      if (!result.ok) return send(res, 400, { error: result.error });
+      return send(res, 200, result.value);
+    }
+    if (req.method === "POST" && path === "/admin/faucet") {
+      if (config.moneyMode !== "dry-run") return send(res, 400, { error: "The faucet exists only in dry-run." });
+      return send(res, 400, { error: "Fund an agent with simulate-transfer, or top up the ledger." });
+    }
+    return send(res, 404, { error: "Unknown admin route." });
+  }
+
+  const internal = /^\/internal\/agents\/(a[a-f0-9]+)(\/snapshot|\/infer|\/tool|\/turn)$/.exec(path);
+  if (internal) {
+    const agentId = internal[1];
+    const token = bearer(req);
+    if (!swarm.checkToken(agentId, token)) return send(res, 401, { error: "Agent token rejected." });
+    if (req.method === "GET" && internal[2] === "/snapshot") {
+      try {
+        return send(res, 200, await host.snapshot(agentId));
+      } catch {
+        return send(res, 404, { error: "Unknown agent." });
+      }
+    }
+    const body = await readJson(req);
+    if (req.method === "POST" && internal[2] === "/infer") {
+      const messages = Array.isArray(body.messages) ? (body.messages as ChatMessage[]) : [];
+      const tools = Array.isArray(body.tools) ? body.tools : [];
+      return send(res, 200, await host.infer(agentId, messages, tools));
+    }
+    if (req.method === "POST" && internal[2] === "/tool") {
+      return send(res, 200, await host.authorizeTool(agentId, body.call as ToolCall));
+    }
+    if (req.method === "POST" && internal[2] === "/turn") {
+      await host.recordTurn(agentId, String(body.text ?? ""));
+      return send(res, 200, { ok: true });
+    }
+  }
+  send(res, 404, { error: "Not found." });
+}
+
+async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppConfig, swarm: Swarm, agentId: string): Promise<void> {
+  const service = swarm.service(agentId);
+  const snapshot = swarm.overview().agents.find((agent) => agent.id === agentId);
+  if (!service || !snapshot) return send(res, 404, { error: "No paid service is offered here." });
+  const header = req.headers["x-payment"];
+  const payment = Array.isArray(header) ? header[0] : header;
+  if (!payment) {
+    res.writeHead(402, {
+      "Content-Type": "application/json; charset=utf-8",
+      "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
+    });
+    res.end(
+      JSON.stringify(
+        paymentRequirements({
+          config,
+          payTo: snapshot.walletAddress as `0x${string}`,
+          amountUnits: BigInt(service.priceUnits),
+          resource: `/a/${agentId}`,
+          description: service.description,
+        }),
+      ),
+    );
+    return;
+  }
+  const settled = await swarm.settleDryPayment(agentId, payment);
+  if (!settled.ok) return send(res, 402, { error: settled.error });
+  res.writeHead(200, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
+  });
+  res.end(settled.value.body);
+}
+
+function adminOk(req: IncomingMessage, expected: string): boolean {
+  const header = req.headers["x-admin-token"];
+  const got = Array.isArray(header) ? header[0] : header ?? "";
+  if (!expected || got.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(got), Buffer.from(expected));
+}
+
+function bearer(req: IncomingMessage): string {
+  const header = req.headers.authorization ?? "";
+  return header.startsWith("Bearer ") ? header.slice(7) : "";
+}
+
+function send(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent) return;
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff" });
+  res.end(JSON.stringify(body));
+}
+
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > 256_000) throw new Error("Request body is too large.");
+    chunks.push(buffer);
+  }
+  if (chunks.length === 0) return {};
+  const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("JSON object required.");
+  return parsed as Record<string, unknown>;
+}
