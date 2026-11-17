@@ -17,6 +17,7 @@ import type { SearchProvider } from "./search.js";
 import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
+import { rateLimitCounts } from "./http.js";
 import { createWallet, decryptWalletKey } from "./wallet.js";
 import {
   networkMatches,
@@ -501,7 +502,7 @@ export class Swarm {
     return { ok: false, reason: `Unknown tool ${call.name}.` };
   }
 
-  async settleDryPayment(sellerId: string, header: string): Promise<Result<{ body: string }>> {
+  async settleDryPayment(sellerId: string, header: string): Promise<Result<{ body: string; txHash?: string }>> {
     if (!header.trim().startsWith("dryrun:")) return this.settleX402(sellerId, header);
     if (this.config.moneyMode !== "dry-run") {
       return { ok: false, error: "Dry-run payment headers are refused when MONEY_MODE=live." };
@@ -512,7 +513,7 @@ export class Swarm {
     if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
     const { parseDryPayment } = await import("./x402.js");
     const payment = parseDryPayment(header);
-    if (!payment) return { ok: false, error: "Dry-run payments use X-PAYMENT: dryrun:<from>:<units>:<nonce>." };
+    if (!payment) return { ok: false, error: "Dry-run payments use PAYMENT-SIGNATURE: dryrun:<from>:<units>:<nonce>." };
     if (payment.units !== BigInt(service.priceUnits)) {
       return { ok: false, error: `Price is ${service.priceUnits} units.` };
     }
@@ -556,10 +557,10 @@ export class Swarm {
     }
     kvSet(this.db, nonceKey, "1");
     this.event(sellerId, "x402_in", `Paid ${formatUsd(service.priceUnits)} by ${payment.from}`);
-    return { ok: true, value: { body: service.body } };
+    return { ok: true, value: { body: service.body, txHash: moved.txHash } };
   }
 
-  private async settleX402(sellerId: string, header: string): Promise<Result<{ body: string }>> {
+  private async settleX402(sellerId: string, header: string): Promise<Result<{ body: string; txHash?: string }>> {
     const seller = getAgent(this.db, sellerId);
     const service = getService(this.db, sellerId);
     if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
@@ -601,7 +602,7 @@ export class Swarm {
     }
     kvSet(this.db, nonceKey, settled.txHash);
     this.event(sellerId, "x402_in", `Settled ${formatUsd(service.priceUnits)} in ${settled.txHash}.`);
-    return { ok: true, value: { body: service.body } };
+    return { ok: true, value: { body: service.body, txHash: settled.txHash } };
   }
 
   async syncChain(): Promise<void> {
@@ -797,6 +798,7 @@ export class Swarm {
     const events = this.db
       .prepare("SELECT agent_id, kind, message, created_at FROM events WHERE created_at >= ? ORDER BY id ASC")
       .all(since) as unknown as { agent_id: string | null; kind: string; message: string; created_at: number }[];
+    const limits = rateLimitCounts();
     const notable = events.filter((event) =>
       ["died", "income", "x402_in", "spawn", "constitution_block", "swept", "grace", "recovered"].includes(event.kind),
     );
@@ -808,6 +810,7 @@ export class Swarm {
       `Model: ${this.config.defaultModel}`,
       `Alive: ${alive.length}`,
       `Dead: ${dead.length}`,
+      `HTTP 429: facilitator ${limits.facilitator}, openrouter ${limits.openrouter}, search ${limits.search}`,
       "",
       "## Agents",
     ];
@@ -851,7 +854,7 @@ export class Swarm {
       const text = await response.text();
       return { ok: true, value: `HTTP ${response.status}\n${text.slice(0, 2000)}` };
     }
-    const challenge = (await response.json()) as { accepts?: { amount?: string; payTo?: string; asset?: string; description?: string }[] };
+    const challenge = await readPaymentRequired(response);
     const accept = challenge.accepts?.[0];
     if (!accept?.payTo || !accept.amount) return { ok: false, error: "402 response did not include an exact payment requirement." };
     let price: bigint;
@@ -864,7 +867,7 @@ export class Swarm {
     if (!Number.isSafeInteger(Number(price))) return { ok: false, error: "Price is too large for the ledger." };
     const allowed = this.authorize(agentId, Number(price), "x402");
     if (!allowed.ok) return allowed;
-    const { signAuthorization, encodePaymentHeader } = await import("./x402.js");
+    const { signAuthorization, encodePaymentHeader, v2PaymentHeaders } = await import("./x402.js");
     const key = decryptWalletKey(buyer.walletCiphertext, this.config.masterKey);
     const nonce = `0x${randomBytes(32).toString("hex")}` as `0x${string}`;
     const now = BigInt(Math.floor(this.clock.now() / 1000));
@@ -885,7 +888,7 @@ export class Swarm {
       resource: url,
       description: accept.description ?? "paid request",
     });
-    const paid = await fetch(url, { redirect: "manual", headers: { "PAYMENT-SIGNATURE": header, "X-PAYMENT": header } });
+    const paid = await fetch(url, { redirect: "manual", headers: v2PaymentHeaders(header) });
     const body = (await paid.text()).slice(0, 4000);
     if (!paid.ok) return { ok: false, error: `Paid request failed with HTTP ${paid.status}. Ledger was not debited. ${body.slice(0, 300)}` };
     const debited = this.debit(agentId, Number(price), "x402", `x402-out:${nonce}`, `external ${url}`);
@@ -1181,6 +1184,22 @@ async function defaultResolve(host: string): Promise<string[]> {
   const dns = await import("node:dns/promises");
   const looked = await dns.lookup(host, { all: true });
   return looked.map((entry) => entry.address);
+}
+
+async function readPaymentRequired(response: Response): Promise<{ accepts?: { amount?: string; payTo?: string; description?: string }[] }> {
+  const encoded = response.headers.get("payment-required");
+  if (encoded) {
+    try {
+      return JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as { accepts?: { amount?: string; payTo?: string; description?: string }[] };
+    } catch {
+      return {};
+    }
+  }
+  try {
+    return (await response.json()) as { accepts?: { amount?: string; payTo?: string; description?: string }[] };
+  } catch {
+    return {};
+  }
 }
 
 function isPrivateLiteral(host: string): boolean {

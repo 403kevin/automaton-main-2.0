@@ -1,3 +1,9 @@
+import { fetchWithBackoff } from "./http.js";
+
+async function searchFetch(url: string, init?: RequestInit): Promise<Response> {
+  return fetchWithBackoff(url, init, "search");
+}
+
 export interface SearchHit {
   title: string;
   url: string;
@@ -25,7 +31,7 @@ export class MockSearch implements SearchProvider {
 export class DuckDuckGoSearch implements SearchProvider {
   async search(query: string): Promise<SearchHit[]> {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
-    const response = await fetch(url);
+    const response = await searchFetch(url);
     if (!response.ok) throw new Error(`DuckDuckGo HTTP ${response.status}`);
     const body = (await response.json()) as {
       AbstractText?: string;
@@ -56,7 +62,7 @@ export class SearxSearch implements SearchProvider {
 
   async search(query: string): Promise<SearchHit[]> {
     const url = `${this.baseUrl.replace(/\/$/, "")}/search?q=${encodeURIComponent(query)}&format=json`;
-    const response = await fetch(url);
+    const response = await searchFetch(url);
     if (!response.ok) throw new Error(`SearxNG HTTP ${response.status}`);
     const body = (await response.json()) as { results?: { title?: string; url?: string; content?: string }[] };
     return (body.results ?? []).slice(0, 5).map((result) => ({
@@ -72,7 +78,7 @@ export class BraveSearch implements SearchProvider {
 
   async search(query: string): Promise<SearchHit[]> {
     const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`;
-    const response = await fetch(url, { headers: { Accept: "application/json", "X-Subscription-Token": this.apiKey } });
+    const response = await searchFetch(url, { headers: { Accept: "application/json", "X-Subscription-Token": this.apiKey } });
     if (!response.ok) throw new Error(`Brave Search HTTP ${response.status}`);
     const body = (await response.json()) as { web?: { results?: { title?: string; url?: string; description?: string }[] } };
     return (body.web?.results ?? []).slice(0, 5).map((result) => ({
@@ -87,7 +93,7 @@ export class TavilySearch implements SearchProvider {
   constructor(private readonly apiKey: string) {}
 
   async search(query: string): Promise<SearchHit[]> {
-    const response = await fetch("https://api.tavily.com/search", {
+    const response = await searchFetch("https://api.tavily.com/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: this.apiKey, query, max_results: 5 }),
@@ -106,7 +112,7 @@ export class ExaSearch implements SearchProvider {
   constructor(private readonly apiKey: string) {}
 
   async search(query: string): Promise<SearchHit[]> {
-    const response = await fetch("https://api.exa.ai/search", {
+    const response = await searchFetch("https://api.exa.ai/search", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": this.apiKey },
       body: JSON.stringify({ query, numResults: 5 }),

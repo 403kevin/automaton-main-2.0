@@ -144,7 +144,7 @@ Still limited:
 
 Dry-run with `LLM_MODE=mock` costs nothing. OpenRouter charges the API key on your account. The ledger does not pay that invoice. It is the agent's internal bill so rent and caps mean something. Set `DAILY_RENT_USD` and the reserve to roughly what you are willing to sponsor per agent. A small model and a turn every 15 seconds is often cents per day if the model is cheap, and much more if you point `DEFAULT_MODEL` at a large one. The reserve refuses a call rather than letting one turn spend the cap.
 
-Base Sepolia gas and test USDC come from faucets. Mainnet USDC and gas are real. A dead agent's remaining USDC is sent to your treasury only when the sweep transaction succeeds.
+Base Sepolia gas comes from the Coinbase CDP faucet at https://portal.cdp.coinbase.com/products/faucet. Alchemy's faucet requires mainnet history, so use Coinbase for a fresh gas-funder wallet. Test USDC comes from Circle's faucet. Mainnet USDC and gas are real. A dead agent's remaining USDC is sent to the treasury only after a successful sweep, which first tops up ETH when `GAS_FUNDER_PRIVATE_KEY` is set.
 
 ## Seven-day Base Sepolia soak
 
@@ -169,7 +169,7 @@ Leave the containers up. Reports are written every `REPORT_INTERVAL_MS` (24 hour
 
 Free pieces, if you do not want to buy them:
 
-- Base Sepolia ETH for the gas funder: a public faucet such as Coinbase's Base Sepolia faucet.
+- Base Sepolia ETH for the gas funder: the Coinbase CDP faucet (https://portal.cdp.coinbase.com/products/faucet). Alchemy's Base Sepolia faucet asks for mainnet history, so a new wallet will not get ETH there.
 - Base Sepolia USDC, if you want an outside payer: Circle's testnet faucet.
 - Search: the soak compose file starts SearXNG. No search key. Brave, Tavily, and Exa are optional and each has a free tier (`BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, `EXA_API_KEY`).
 - x402 settlement on Sepolia: `https://x402.org/facilitator` is the default and needs no key. Direct broadcast is the option that needs `FACILITATOR_PRIVATE_KEY` plus faucet ETH.

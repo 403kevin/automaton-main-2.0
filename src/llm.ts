@@ -1,4 +1,6 @@
+import { buildCompletionBody, extractActions, toolCallsFromActions } from "./actions.js";
 import type { AppConfig } from "./config.js";
+import { fetchWithBackoff } from "./http.js";
 import { parseUsd } from "./money.js";
 import type { ChatMessage } from "./types.js";
 
@@ -43,37 +45,105 @@ export class MockLlm implements LlmClient {
   }
 }
 
+export class ModelCatalog {
+  private loadedAt = 0;
+  private loaded = false;
+  private readonly parameters = new Map<string, string[]>();
+
+  constructor(
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  ) {}
+
+  async supportedParameters(model: string): Promise<string[] | undefined> {
+    if (!this.loaded || Date.now() - this.loadedAt > 600_000) await this.refresh();
+    if (!this.loaded) return undefined;
+    return this.parameters.get(model);
+  }
+
+  private async refresh(): Promise<void> {
+    try {
+      const response = await fetchWithBackoff("https://openrouter.ai/api/v1/models", undefined, "openrouter", {
+        fetch: this.fetcher,
+        sleep: this.sleep,
+      });
+      if (!response.ok) return;
+      const body = (await response.json()) as { data?: { id?: string; supported_parameters?: string[] }[] };
+      this.parameters.clear();
+      for (const model of body.data ?? []) {
+        if (model.id) this.parameters.set(model.id, model.supported_parameters ?? []);
+      }
+      this.loaded = true;
+      this.loadedAt = Date.now();
+    } catch {
+      this.loaded = false;
+    }
+  }
+}
+
 export class OpenRouterLlm implements LlmClient {
-  constructor(private readonly config: AppConfig) {}
+  private readonly catalog: ModelCatalog;
+  private readonly fetcher: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
+
+  constructor(
+    private readonly config: AppConfig,
+    deps?: { fetch?: typeof fetch; catalog?: ModelCatalog; sleep?: (ms: number) => Promise<void> },
+  ) {
+    this.fetcher = deps?.fetch ?? fetch;
+    this.sleep = deps?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.catalog = deps?.catalog ?? new ModelCatalog(this.fetcher, this.sleep);
+  }
 
   async complete(input: { model: string; messages: ChatMessage[]; tools?: unknown[] }): Promise<LlmCompletion> {
-    const response = await fetch(this.config.openRouterUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.config.openRouterKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:4747",
-        "X-Title": "Automaton",
-      },
-      body: JSON.stringify({
-        model: input.model,
-        messages: input.messages,
-        tools: input.tools && input.tools.length > 0 ? input.tools : undefined,
-        max_tokens: 700,
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      throw new Error(`OpenRouter HTTP ${response.status}: ${text.slice(0, 300)}`);
+    const supported = await this.catalog.supportedParameters(input.model);
+    const planned = buildCompletionBody({ model: input.model, messages: input.messages, tools: input.tools, supported });
+    const first = await this.post(planned.body);
+    if (planned.protocol === "tools") return first;
+    const parsed = extractActions(first.content);
+    if (parsed.ok) {
+      return { ...first, content: parsed.say || first.content, toolCalls: jsonToolCalls(parsed.actions) };
     }
-    const body = JSON.parse(text) as {
+    const retryMessages = [
+      ...((planned.body.messages as ChatMessage[]) ?? input.messages),
+      { role: "user" as const, content: "That was not valid JSON. Reply with one JSON object only, using say and actions." },
+    ];
+    const second = await this.post({ ...planned.body, messages: retryMessages });
+    const again = extractActions(second.content);
+    return {
+      ...second,
+      content: again.ok ? again.say || second.content : second.content,
+      toolCalls: again.ok ? jsonToolCalls(again.actions) : [],
+      usage: addUsage(first.usage, second.usage),
+    };
+  }
+
+  private async post(body: Record<string, unknown>): Promise<LlmCompletion> {
+    const response = await fetchWithBackoff(
+      this.config.openRouterUrl,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.config.openRouterKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": "http://localhost:4747",
+          "X-Title": "Automaton",
+        },
+        body: JSON.stringify(body),
+      },
+      "openrouter",
+      { fetch: this.fetcher, sleep: this.sleep },
+    );
+    const text = await response.text();
+    if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}: ${text.slice(0, 300)}`);
+    const parsed = JSON.parse(text) as {
       choices?: { message?: { content?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
     };
-    const message = body.choices?.[0]?.message;
-    const cost = body.usage?.cost;
+    const message = parsed.choices?.[0]?.message;
+    const cost = parsed.usage?.cost;
     return {
-      model: input.model,
+      model: String(body.model ?? ""),
       content: message?.content ?? "",
       toolCalls: (message?.tool_calls ?? []).map((call) => ({
         id: call.id,
@@ -81,12 +151,29 @@ export class OpenRouterLlm implements LlmClient {
         arguments: call.function.arguments,
       })),
       usage: {
-        promptTokens: body.usage?.prompt_tokens ?? 0,
-        completionTokens: body.usage?.completion_tokens ?? 0,
+        promptTokens: parsed.usage?.prompt_tokens ?? 0,
+        completionTokens: parsed.usage?.completion_tokens ?? 0,
         costUsd: typeof cost === "number" ? cost.toFixed(6) : undefined,
       },
     };
   }
+}
+
+function jsonToolCalls(actions: { name: string; arguments: Record<string, unknown> }[]): LlmCompletion["toolCalls"] {
+  return toolCallsFromActions(actions).map((call) => ({
+    id: call.id,
+    name: call.name,
+    arguments: JSON.stringify(call.arguments),
+  }));
+}
+
+function addUsage(left: LlmUsage, right: LlmUsage): LlmUsage {
+  const cost = [left.costUsd, right.costUsd].filter(Boolean).map((item) => Number(item));
+  return {
+    promptTokens: left.promptTokens + right.promptTokens,
+    completionTokens: left.completionTokens + right.completionTokens,
+    costUsd: cost.length ? cost.reduce((sum, item) => sum + item, 0).toFixed(6) : undefined,
+  };
 }
 
 export function createLlm(config: AppConfig): LlmClient {

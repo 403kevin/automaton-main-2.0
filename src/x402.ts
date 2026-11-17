@@ -33,13 +33,9 @@ export function paymentRequirements(input: {
     scheme: "exact",
     network: caipNetwork(input.config),
     amount: input.amountUnits.toString(),
-    maxAmountRequired: input.amountUnits.toString(),
     asset: input.config.usdcAddress,
     payTo: input.payTo,
     maxTimeoutSeconds: 300,
-    resource: input.resource,
-    description: input.description,
-    mimeType: "text/plain",
     extra: { name: input.config.usdcName, version: input.config.usdcVersion },
   };
   return {
@@ -52,14 +48,29 @@ export function paymentRequirements(input: {
 }
 
 export const PUBLIC_SEPOLIA_FACILITATOR = "https://x402.org/facilitator";
+export const BASE_SEPOLIA_USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+
+/** v2 HTTP header names. v1 used X-PAYMENT and X-PAYMENT-RESPONSE. */
+export const X402_HEADERS = {
+  required: "PAYMENT-REQUIRED",
+  signature: "PAYMENT-SIGNATURE",
+  response: "PAYMENT-RESPONSE",
+} as const;
 
 export function caipNetwork(config: AppConfig): string {
   return config.network === "base" ? "eip155:8453" : "eip155:84532";
 }
 
 export function networkMatches(config: AppConfig, network: string): boolean {
-  const alias = config.network === "base" ? "base" : "base-sepolia";
-  return network === caipNetwork(config) || network === alias;
+  return network === caipNetwork(config);
+}
+
+export function encodeHeaderValue(body: unknown): string {
+  return Buffer.from(JSON.stringify(body)).toString("base64");
+}
+
+export function v2PaymentHeaders(signature: string): Record<string, string> {
+  return { [X402_HEADERS.signature]: signature };
 }
 
 export function domainFor(config: AppConfig) {

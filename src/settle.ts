@@ -2,6 +2,7 @@ import { createPublicClient, createWalletClient, http, parseAbi, type Hex } from
 import { privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 import type { AppConfig } from "./config.js";
+import { fetchWithBackoff } from "./http.js";
 import { redact } from "./redact.js";
 import {
   facilitatorSettleBody,
@@ -72,7 +73,7 @@ export class LiveSettler implements PaymentSettler {
 
   private async viaFacilitator(message: AuthorizationMessage, signature: Hex): Promise<{ ok: true; txHash: string } | { ok: false; error: string }> {
     try {
-      const response = await fetch(`${this.config.facilitatorUrl.replace(/\/$/, "")}/settle`, {
+      const response = await fetchWithBackoff(`${this.config.facilitatorUrl.replace(/\/$/, "")}/settle`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
@@ -84,7 +85,9 @@ export class LiveSettler implements PaymentSettler {
             description: "Automaton paid response",
           }),
         ),
-      });
+      },
+        "facilitator",
+      );
       const text = await response.text();
       let body: unknown = {};
       try {

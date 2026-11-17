@@ -4,7 +4,7 @@ import type { AppConfig } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import type { DirectHost } from "./host.js";
 import { parseUsd } from "./money.js";
-import { paymentRequirements } from "./x402.js";
+import { caipNetwork, encodeHeaderValue, paymentRequirements, X402_HEADERS } from "./x402.js";
 import type { Swarm } from "./swarm.js";
 import { redact } from "./redact.js";
 import type { ChatMessage, ToolCall } from "./types.js";
@@ -134,30 +134,32 @@ async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppC
   const service = swarm.service(agentId);
   const snapshot = swarm.overview().agents.find((agent) => agent.id === agentId);
   if (!service || !snapshot) return send(res, 404, { error: "No paid service is offered here." });
-  const signatureHeader = req.headers["payment-signature"] ?? req.headers["x-payment"];
+  const signatureHeader = req.headers["payment-signature"];
   const payment = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  const challenge = paymentRequirements({
+    config,
+    payTo: snapshot.walletAddress as `0x${string}`,
+    amountUnits: BigInt(service.priceUnits),
+    resource: `/a/${agentId}`,
+    description: service.description,
+  });
   if (!payment) {
     res.writeHead(402, {
       "Content-Type": "application/json; charset=utf-8",
+      [X402_HEADERS.required]: encodeHeaderValue(challenge),
+      "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
       "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
     });
-    res.end(
-      JSON.stringify(
-        paymentRequirements({
-          config,
-          payTo: snapshot.walletAddress as `0x${string}`,
-          amountUnits: BigInt(service.priceUnits),
-          resource: `/a/${agentId}`,
-          description: service.description,
-        }),
-      ),
-    );
+    res.end(JSON.stringify(challenge));
     return;
   }
   const settled = await swarm.settleDryPayment(agentId, payment);
   if (!settled.ok) return send(res, 402, { error: settled.error });
+  const receipt = { success: true, transaction: settled.value.txHash ?? "", network: caipNetwork(config) };
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8",
+    [X402_HEADERS.response]: encodeHeaderValue(receipt),
+    "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
     "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
   });
   res.end(settled.value.body);
