@@ -1,0 +1,18 @@
+services:
+  orchestrator:
+    env_file:
+      - config/soak.sepolia.env
+    environment:
+      DATA_DIR: /app/data
+      RUNTIME: docker
+      AGENT_IMAGE: automaton:2
+      DOCKER_NETWORK: automaton_default
+      DOCKER_VOLUME: automaton-data
+      ORCHESTRATOR_URL: http://orchestrator:4747
+      SEARXNG_URL: http://searxng:8080
+      SEARCH_PROVIDER: searxng
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro

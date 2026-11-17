@@ -1,4 +1,4 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { Address } from "viem";
@@ -18,6 +18,12 @@ import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
 import { createWallet, decryptWalletKey } from "./wallet.js";
+import {
+  networkMatches,
+  parseX402Header,
+  verifyAuthorization,
+  type PaymentSettler,
+} from "./x402.js";
 
 export interface ToolAuth {
   ok: true;
@@ -56,6 +62,8 @@ export class Swarm {
   private maintaining = false;
   private scheduler: RentScheduler | null = null;
   private councilRunner?: (agentId: string, question: string) => Promise<Result<string>>;
+  private settler: PaymentSettler | null = null;
+  private reportTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -84,6 +92,10 @@ export class Swarm {
     this.councilRunner = runner;
   }
 
+  setSettler(settler: PaymentSettler): void {
+    this.settler = settler;
+  }
+
   startScheduler(): void {
     this.scheduler = new RentScheduler(() => {
       void this.runMaintenance();
@@ -97,6 +109,8 @@ export class Swarm {
 
   async haltBodies(): Promise<void> {
     this.stopScheduler();
+    if (this.reportTimer) clearInterval(this.reportTimer);
+    this.reportTimer = null;
     for (const agent of this.living()) {
       try {
         await this.runtime.stop(agent.id);
@@ -488,6 +502,10 @@ export class Swarm {
   }
 
   async settleDryPayment(sellerId: string, header: string): Promise<Result<{ body: string }>> {
+    if (!header.trim().startsWith("dryrun:")) return this.settleX402(sellerId, header);
+    if (this.config.moneyMode !== "dry-run") {
+      return { ok: false, error: "Dry-run payment headers are refused when MONEY_MODE=live." };
+    }
     const seller = getAgent(this.db, sellerId);
     const service = getService(this.db, sellerId);
     if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
@@ -538,6 +556,51 @@ export class Swarm {
     }
     kvSet(this.db, nonceKey, "1");
     this.event(sellerId, "x402_in", `Paid ${formatUsd(service.priceUnits)} by ${payment.from}`);
+    return { ok: true, value: { body: service.body } };
+  }
+
+  private async settleX402(sellerId: string, header: string): Promise<Result<{ body: string }>> {
+    const seller = getAgent(this.db, sellerId);
+    const service = getService(this.db, sellerId);
+    if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
+    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
+    const parsed = parseX402Header(header);
+    if (!parsed.ok) return parsed;
+    if (!networkMatches(this.config, parsed.value.network)) {
+      return { ok: false, error: `Payment network ${parsed.value.network || "(missing)"} does not match ${this.config.network}.` };
+    }
+    const message = parsed.value.message;
+    if (message.to.toLowerCase() !== seller.walletAddress.toLowerCase()) {
+      return { ok: false, error: "Authorization is not payable to this agent." };
+    }
+    if (message.from.toLowerCase() === seller.walletAddress.toLowerCase()) {
+      return { ok: false, error: "An agent cannot pay itself." };
+    }
+    if (message.value !== BigInt(service.priceUnits)) {
+      return { ok: false, error: `Price is ${service.priceUnits} units.` };
+    }
+    const verified = await verifyAuthorization(this.config, message, parsed.value.signature);
+    if (!verified.ok) return verified;
+    const nonceKey = `nonce:${message.nonce}`;
+    if (kvGet(this.db, nonceKey)) return { ok: false, error: "Payment nonce was already used." };
+    const settler = this.settler ?? new SimulatedSettler(this.chain);
+    const settled = await settler.settle(message, parsed.value.signature);
+    if (!settled.ok) return { ok: false, error: settled.error };
+    const credited = this.post({
+      agentId: sellerId,
+      kind: "x402_in",
+      amount: service.priceUnits,
+      ref: `onchain:${settled.txHash}`,
+      note: `x402 from ${message.from}`,
+    });
+    if (!credited.ok) return credited;
+    const payer = getAgentByAddress(this.db, message.from);
+    if (payer) {
+      const debited = this.debit(payer.id, service.priceUnits, "x402", `x402-out:${settled.txHash}`, `paid ${seller.name}`);
+      if (!debited.ok) this.event(payer.id, "ledger_drift", `Settlement ${settled.txHash} confirmed but the payer ledger debit failed: ${debited.error}`);
+    }
+    kvSet(this.db, nonceKey, settled.txHash);
+    this.event(sellerId, "x402_in", `Settled ${formatUsd(service.priceUnits)} in ${settled.txHash}.`);
     return { ok: true, value: { body: service.body } };
   }
 
@@ -643,6 +706,7 @@ export class Swarm {
       treasurySwept: kvGet(this.db, "treasury_swept_units") ?? "0",
       llmMode: this.config.llmMode,
       runtime: this.config.runtime,
+      dailyReport: kvGet(this.db, "daily_report") ?? "",
       agents,
       events: events.map((event) => ({
         agentId: event.agent_id,
@@ -699,7 +763,7 @@ export class Swarm {
       if (this.config.moneyMode !== "live") {
         return { ok: false, error: "Dry-run can pay another local agent at /a/<id>. External x402 needs MONEY_MODE=live." };
       }
-      return { ok: false, error: "External live x402 payment is not settled in this build yet. Local /a/<id> payments work." };
+      return this.payExternal(agentId, url, maxUnits);
     }
     const sellerId = local[1];
     const service = getService(this.db, sellerId);
@@ -712,6 +776,121 @@ export class Swarm {
     const settled = await this.settleDryPayment(sellerId, header);
     if (!settled.ok) return settled;
     return { ok: true, value: settled.value.body.slice(0, 2000) };
+  }
+
+  startReports(): void {
+    void this.writeDailyReport();
+    if (this.config.reportIntervalMs <= 0 || this.reportTimer) return;
+    this.reportTimer = setInterval(() => {
+      void this.writeDailyReport();
+    }, this.config.reportIntervalMs);
+    this.reportTimer.unref?.();
+  }
+
+  writeDailyReport(): { path: string; markdown: string } {
+    const now = this.clock.now();
+    const day = dayKey(now);
+    const since = now - 86_400_000;
+    const agents = listAgents(this.db);
+    const alive = agents.filter((agent) => agent.status !== "archived");
+    const dead = agents.filter((agent) => agent.status === "archived");
+    const events = this.db
+      .prepare("SELECT agent_id, kind, message, created_at FROM events WHERE created_at >= ? ORDER BY id ASC")
+      .all(since) as unknown as { agent_id: string | null; kind: string; message: string; created_at: number }[];
+    const notable = events.filter((event) =>
+      ["died", "income", "x402_in", "spawn", "constitution_block", "swept", "grace", "recovered"].includes(event.kind),
+    );
+    const lines = [
+      `# Automaton daily report ${day}`,
+      "",
+      `Clock: ${new Date(now).toISOString()}`,
+      `Network: ${this.config.network} (${this.config.moneyMode})`,
+      `Model: ${this.config.defaultModel}`,
+      `Alive: ${alive.length}`,
+      `Dead: ${dead.length}`,
+      "",
+      "## Agents",
+    ];
+    for (const agent of agents) {
+      lines.push(
+        `### ${agent.name}`,
+        `- status: ${agent.status}`,
+        `- tier: ${tierFor(agent.balanceUnits, this.config)}`,
+        `- balance: ${formatUsd(agent.balanceUnits)}`,
+        `- income: ${formatUsd(this.sumKinds(agent.id, ["onchain_income", "x402_in"]))}`,
+        `- spend: ${formatUsd(this.spendTotal(agent.id))}`,
+        `- last: ${agent.lastAction ?? "(none)"}`,
+        "",
+      );
+    }
+    lines.push("## Notable actions");
+    if (notable.length === 0) lines.push("- None in the last day.");
+    for (const event of notable.slice(-40)) {
+      lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${event.message}`);
+    }
+    lines.push("");
+    const markdown = lines.join("\n");
+    const dir = path.join(this.config.dataDir, "reports");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${day}.md`);
+    fs.writeFileSync(file, markdown);
+    kvSet(this.db, "daily_report", markdown);
+    return { path: file, markdown };
+  }
+
+  private async payExternal(agentId: string, url: string, maxUnits: number): Promise<Result<string>> {
+    const buyer = getAgent(this.db, agentId);
+    if (!buyer) return { ok: false, error: "Unknown buyer." };
+    let response: Response;
+    try {
+      response = await fetch(url, { redirect: "manual" });
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "Payment request failed." };
+    }
+    if (response.status !== 402) {
+      const text = await response.text();
+      return { ok: true, value: `HTTP ${response.status}\n${text.slice(0, 2000)}` };
+    }
+    const challenge = (await response.json()) as { accepts?: { amount?: string; payTo?: string; asset?: string; description?: string }[] };
+    const accept = challenge.accepts?.[0];
+    if (!accept?.payTo || !accept.amount) return { ok: false, error: "402 response did not include an exact payment requirement." };
+    let price: bigint;
+    try {
+      price = BigInt(accept.amount);
+    } catch {
+      return { ok: false, error: "402 amount is not an integer." };
+    }
+    if (price > BigInt(maxUnits)) return { ok: false, error: "Price is above the maximum you allowed." };
+    if (!Number.isSafeInteger(Number(price))) return { ok: false, error: "Price is too large for the ledger." };
+    const allowed = this.authorize(agentId, Number(price), "x402");
+    if (!allowed.ok) return allowed;
+    const { signAuthorization, encodePaymentHeader } = await import("./x402.js");
+    const key = decryptWalletKey(buyer.walletCiphertext, this.config.masterKey);
+    const nonce = `0x${randomBytes(32).toString("hex")}` as `0x${string}`;
+    const now = BigInt(Math.floor(this.clock.now() / 1000));
+    const { privateKeyToAccount } = await import("viem/accounts");
+    const message = {
+      from: privateKeyToAccount(key).address,
+      to: accept.payTo as `0x${string}`,
+      value: price,
+      validAfter: 0n,
+      validBefore: now + 300n,
+      nonce,
+    };
+    const signature = await signAuthorization(key, this.config, message);
+    const header = encodePaymentHeader({
+      config: this.config,
+      message,
+      signature,
+      resource: url,
+      description: accept.description ?? "paid request",
+    });
+    const paid = await fetch(url, { redirect: "manual", headers: { "PAYMENT-SIGNATURE": header, "X-PAYMENT": header } });
+    const body = (await paid.text()).slice(0, 4000);
+    if (!paid.ok) return { ok: false, error: `Paid request failed with HTTP ${paid.status}. Ledger was not debited. ${body.slice(0, 300)}` };
+    const debited = this.debit(agentId, Number(price), "x402", `x402-out:${nonce}`, `external ${url}`);
+    if (!debited.ok) return { ok: false, error: `The remote server accepted payment but the ledger debit failed: ${debited.error}` };
+    return { ok: true, value: body };
   }
 
   private chargeTool(agentId: string, name: string, callId: string): Result<{ balance: number }> {
@@ -980,6 +1159,16 @@ export class Swarm {
     fs.writeFileSync(path.join(workspace, "genesis.md"), genesis);
     fs.writeFileSync(path.join(workspace, "strategy.md"), notes);
     fs.writeFileSync(path.join(workspace, "constitution.md"), CONSTITUTION_TEXT);
+  }
+}
+
+class SimulatedSettler implements PaymentSettler {
+  constructor(private readonly chain: ChainPort) {}
+
+  async settle(message: { from: string; to: string; value: bigint }): Promise<{ ok: true; txHash: string } | { ok: false; error: string }> {
+    const moved = await this.chain.transferBetween(message.from, message.to, message.value);
+    if (!moved.ok || !moved.txHash) return { ok: false, error: moved.error ?? "Simulated settlement failed." };
+    return { ok: true, txHash: moved.txHash };
   }
 }
 

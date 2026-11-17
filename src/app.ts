@@ -10,6 +10,7 @@ import { DirectHost } from "./host.js";
 import { InferenceGateway } from "./inference.js";
 import { createLlm } from "./llm.js";
 import { createSearch } from "./search.js";
+import { LiveSettler } from "./settle.js";
 import { Swarm } from "./swarm.js";
 import { createRuntime, FakeRuntime } from "./runtime.js";
 
@@ -44,8 +45,9 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
   const clock = new OffsetClock();
   const chain = config.moneyMode === "live" ? new LiveChain(config) : new DryRunChain(db);
   const llm = createLlm(config);
-  const search = createSearch(config.searchProvider, config.searxngUrl);
+  const search = createSearch(config);
   const swarm = new Swarm(db, config, clock, chain, new FakeRuntime(), search);
+  if (config.moneyMode === "live") swarm.setSettler(new LiveSettler(config));
   const inference = new InferenceGateway(swarm, llm, config);
   swarm.setCouncil((agentId, question) => inference.council(agentId, question));
   const host = new DirectHost(swarm, inference);

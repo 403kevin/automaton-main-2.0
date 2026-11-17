@@ -5,11 +5,11 @@ import { DryRunChain, FlakyChain, type ChainPort } from "../src/chain.js";
 import { ManualClock } from "../src/clock.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
-import { MockSearch } from "../src/search.js";
+import { MockSearch, type SearchProvider } from "../src/search.js";
 import { FakeRuntime } from "../src/runtime.js";
 import { Swarm } from "../src/swarm.js";
 
-export function harness(overrides: Record<string, string> = {}, chain?: ChainPort) {
+export function harness(overrides: Record<string, string> = {}, chain?: ChainPort, search?: SearchProvider) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "automaton-"));
   const config = loadConfig({
     DATA_DIR: dir,
@@ -42,7 +42,8 @@ export function harness(overrides: Record<string, string> = {}, chain?: ChainPor
   const clock = new ManualClock(1_700_000_000_000);
   const book = chain ?? new DryRunChain(db);
   const runtime = new FakeRuntime();
-  const swarm = new Swarm(db, config, clock, book, runtime, new MockSearch());
+  const provider = search ?? new MockSearch();
+  const swarm = new Swarm(db, config, clock, book, runtime, provider);
   return {
     dir,
     config,

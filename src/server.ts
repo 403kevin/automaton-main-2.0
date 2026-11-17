@@ -26,6 +26,7 @@ export function startServer(input: { config: AppConfig; swarm: Swarm; host: Dire
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
       swarm.startScheduler();
+      swarm.startReports();
       void swarm.resumeLiving();
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : config.port;
@@ -133,8 +134,8 @@ async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppC
   const service = swarm.service(agentId);
   const snapshot = swarm.overview().agents.find((agent) => agent.id === agentId);
   if (!service || !snapshot) return send(res, 404, { error: "No paid service is offered here." });
-  const header = req.headers["x-payment"];
-  const payment = Array.isArray(header) ? header[0] : header;
+  const signatureHeader = req.headers["payment-signature"] ?? req.headers["x-payment"];
+  const payment = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
   if (!payment) {
     res.writeHead(402, {
       "Content-Type": "application/json; charset=utf-8",

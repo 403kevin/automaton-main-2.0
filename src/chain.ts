@@ -10,6 +10,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 import type { AppConfig } from "./config.js";
+import { sweepWithGas } from "./gas.js";
 import { redact } from "./redact.js";
 
 export interface Transfer {
@@ -186,12 +187,40 @@ export class LiveChain implements ChainPort {
     }
   }
 
+  private async getEth(address: string): Promise<BalanceResult> {
+    try {
+      const wei = await this.publicClient.getBalance({ address: address as Address });
+      return { ok: true, units: wei };
+    } catch (error) {
+      return { ok: false, error: redact(error instanceof Error ? error.message : "ETH balance read failed") };
+    }
+  }
+
+  private async sendEth(to: Address, wei: bigint): Promise<MoveResult> {
+    if (!this.config.gasFunderKey) return { ok: false, units: 0n, error: "GAS_FUNDER_PRIVATE_KEY is not set." };
+    try {
+      const account = privateKeyToAccount(this.config.gasFunderKey);
+      const wallet = createWalletClient({ account, chain: this.chain, transport: http(this.config.rpcUrl) });
+      const hash = await wallet.sendTransaction({ to, value: wei });
+      const receipt = await this.publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success") return { ok: false, units: 0n, error: "Gas top-up reverted." };
+      return { ok: true, units: wei, txHash: hash };
+    } catch (error) {
+      return { ok: false, units: 0n, error: redact(error instanceof Error ? error.message : "Gas top-up failed") };
+    }
+  }
+
   async sweep(privateKey: `0x${string}`, to: Address): Promise<MoveResult> {
     const from = privateKeyToAccount(privateKey).address;
-    const balance = await this.getBalance(from);
-    if (!balance.ok) return { ok: false, units: 0n, error: balance.error };
-    if (balance.units === 0n) return { ok: true, units: 0n };
-    return this.move(privateKey, to, balance.units);
+    return sweepWithGas({
+      usdc: () => this.getBalance(from),
+      eth: () => this.getEth(from),
+      topUp: (wei) => this.sendEth(from, wei),
+      transfer: (units) => this.move(privateKey, to, units),
+      minWei: this.config.gasMinWei,
+      topUpWei: this.config.gasTopUpWei,
+      funder: Boolean(this.config.gasFunderKey),
+    });
   }
 }
 

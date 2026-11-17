@@ -46,6 +46,7 @@ export function dashboardHtml(): string {
   .row { display: flex; flex-wrap: wrap; gap: 8px; }
   .event { padding: 8px 12px; margin: 0 0 8px; }
   .event time, .event em { color: #a39882; font-style: normal; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  pre.panel { white-space: pre-wrap; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.45; }
   #notice { min-height: 1.2em; color: #f0c08a; }
   @media (max-width: 800px) {
     header { flex-direction: column; align-items: start; }
@@ -85,6 +86,8 @@ export function dashboardHtml(): string {
       <button type="button" class="ghost" id="deposit">Dry-run USDC deposit</button>
     </div>
   </form>
+  <h2>Daily report</h2>
+  <pre id="report" class="panel">No report yet.</pre>
   <h2>Event log</h2>
   <div id="events"></div>
 </main>
@@ -117,6 +120,7 @@ function render(data) {
   const stats = document.querySelector("#stats");
   const agents = document.querySelector("#agents");
   const events = document.querySelector("#events");
+  const report = document.querySelector("#report");
   badges.replaceChildren();
   stats.replaceChildren();
   agents.replaceChildren();
@@ -157,6 +161,7 @@ function render(data) {
     }
     agents.append(card);
   }
+  report.textContent = data.dailyReport || "No daily report yet. The orchestrator writes one on boot and then once a day.";
   if (data.events.length === 0) events.append(el("p", "The log is empty.", "lede"));
   for (const event of data.events) {
     const row = el("div", "", "event");

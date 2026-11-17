@@ -48,8 +48,18 @@ export interface AppConfig {
   dockerVolume: string;
   agentImage: string;
   orchestratorUrl: string;
-  searchProvider: "mock" | "duckduckgo" | "searxng";
+  searchProvider: "auto" | "mock" | "duckduckgo" | "searxng" | "brave" | "tavily" | "exa";
   searxngUrl: string;
+  braveSearchKey?: string;
+  tavilyKey?: string;
+  exaKey?: string;
+  facilitatorKey?: `0x${string}`;
+  facilitatorUrl: string;
+  settlement: "auto" | "direct" | "facilitator";
+  gasFunderKey?: `0x${string}`;
+  gasMinWei: bigint;
+  gasTopUpWei: bigint;
+  reportIntervalMs: number;
   denyHosts: string[];
   turnIntervalMs: number;
   constitutionPath: string;
@@ -80,6 +90,26 @@ function integer(value: string | undefined, fallback: number, name: string): num
     throw new Error(`${name} must be a non-negative number`);
   }
   return Math.floor(parsed);
+}
+
+function privateKey(value: string | undefined, name: string): `0x${string}` | undefined {
+  if (!value) return undefined;
+  const prefixed = value.startsWith("0x") ? value : `0x${value}`;
+  if (!/^0x[a-fA-F0-9]{64}$/.test(prefixed)) {
+    throw new Error(`${name} must be a 32-byte hex private key.`);
+  }
+  return prefixed as `0x${string}`;
+}
+
+function wei(value: string | undefined, fallback: bigint, name: string): bigint {
+  if (!value) return fallback;
+  try {
+    const parsed = BigInt(value);
+    if (parsed < 0n) throw new Error("negative");
+    return parsed;
+  } catch {
+    throw new Error(`${name} must be a non-negative integer number of wei.`);
+  }
 }
 
 function usd(value: string | undefined, fallback: string, name: string): number {
@@ -134,9 +164,22 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (runtimeRaw !== "auto" && runtimeRaw !== "docker" && runtimeRaw !== "process") {
     throw new Error("RUNTIME must be auto, docker, or process.");
   }
-  const searchRaw = env.SEARCH_PROVIDER ?? "mock";
-  if (searchRaw !== "mock" && searchRaw !== "duckduckgo" && searchRaw !== "searxng") {
-    throw new Error("SEARCH_PROVIDER must be mock, duckduckgo, or searxng.");
+  const searchRaw = env.SEARCH_PROVIDER ?? "auto";
+  if (!["auto", "mock", "duckduckgo", "searxng", "brave", "tavily", "exa"].includes(searchRaw)) {
+    throw new Error("SEARCH_PROVIDER must be auto, mock, duckduckgo, searxng, brave, tavily, or exa.");
+  }
+  const settlementRaw = env.X402_SETTLEMENT ?? "auto";
+  if (settlementRaw !== "auto" && settlementRaw !== "direct" && settlementRaw !== "facilitator") {
+    throw new Error("X402_SETTLEMENT must be auto, direct, or facilitator.");
+  }
+  const facilitatorKey = privateKey(env.FACILITATOR_PRIVATE_KEY, "FACILITATOR_PRIVATE_KEY");
+  const gasFunderKey = privateKey(env.GAS_FUNDER_PRIVATE_KEY, "GAS_FUNDER_PRIVATE_KEY") ?? facilitatorKey;
+  let facilitatorUrl = env.X402_FACILITATOR_URL ?? "";
+  if (!facilitatorUrl && moneyMode === "live" && network === "base-sepolia" && settlementRaw !== "direct") {
+    facilitatorUrl = "https://x402.org/facilitator";
+  }
+  if (moneyMode === "live" && network === "base" && settlementRaw === "facilitator" && !env.X402_FACILITATOR_URL) {
+    throw new Error("Mainnet facilitator settlement requires an explicit X402_FACILITATOR_URL.");
   }
   const normalMin = usd(env.NORMAL_MIN_USD, "1.00", "NORMAL_MIN_USD");
   const lowMin = usd(env.LOW_MIN_USD, "0.25", "LOW_MIN_USD");
@@ -191,8 +234,18 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     dockerVolume: env.DOCKER_VOLUME ?? "",
     agentImage: env.AGENT_IMAGE ?? "automaton:2",
     orchestratorUrl: env.ORCHESTRATOR_URL ?? "http://orchestrator:4747",
-    searchProvider: searchRaw,
+    searchProvider: searchRaw as AppConfig["searchProvider"],
     searxngUrl: env.SEARXNG_URL ?? "",
+    braveSearchKey: env.BRAVE_SEARCH_API_KEY,
+    tavilyKey: env.TAVILY_API_KEY,
+    exaKey: env.EXA_API_KEY,
+    facilitatorKey,
+    facilitatorUrl,
+    settlement: settlementRaw,
+    gasFunderKey,
+    gasMinWei: wei(env.GAS_MIN_WEI, 20_000_000_000_000n, "GAS_MIN_WEI"),
+    gasTopUpWei: wei(env.GAS_TOPUP_WEI, 50_000_000_000_000n, "GAS_TOPUP_WEI"),
+    reportIntervalMs: integer(env.REPORT_INTERVAL_MS, 86_400_000, "REPORT_INTERVAL_MS"),
     denyHosts: (env.OWNER_DENY_HOSTS ?? "")
       .split(",")
       .map((item) => item.trim().toLowerCase())
@@ -202,7 +255,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
-      web_search: parseUsd("0.002"),
+      web_search: usd(env.SEARCH_COST_USD, "0.002", "SEARCH_COST_USD"),
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),
