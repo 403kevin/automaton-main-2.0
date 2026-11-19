@@ -78,6 +78,15 @@ export interface AppConfig {
   readFeedPriceUnits: number;
   readFeedHourlyLimit: number;
   redditUserAgent: string;
+  browseEnabled: boolean;
+  browseStepPriceUnits: number;
+  browseLlmReserveUnits: number;
+  browseHourlyLimit: number;
+  browseMaxSteps: number;
+  sensesLlmBaseUrl: string;
+  internalLlmPort: number;
+  internalLlmHost: string;
+  internalLlmAllowCidrs: string[];
   refDir: string;
   publishPagePriceUnits: number;
   serveEndpointPriceUnits: number;
@@ -309,6 +318,20 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     readFeedPriceUnits: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
     readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
     redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
+    browseEnabled: env.BROWSE_ENABLED === "true",
+    browseStepPriceUnits: usd(env.BROWSE_STEP_PRICE_USD, "0.005", "BROWSE_STEP_PRICE_USD"),
+    browseLlmReserveUnits: usd(env.BROWSE_LLM_RESERVE_USD, "0.05", "BROWSE_LLM_RESERVE_USD"),
+    browseHourlyLimit: integer(env.BROWSE_HOURLY_LIMIT, 3, "BROWSE_HOURLY_LIMIT"),
+    browseMaxSteps: Math.min(15, Math.max(1, integer(env.BROWSE_MAX_STEPS, 15, "BROWSE_MAX_STEPS"))),
+    sensesLlmBaseUrl:
+      env.SENSES_LLM_BASE_URL ||
+      `http://127.0.0.1:${integer(env.INTERNAL_LLM_PORT, 4758, "INTERNAL_LLM_PORT")}/internal/llm/v1`,
+    internalLlmPort: integer(env.INTERNAL_LLM_PORT, 4758, "INTERNAL_LLM_PORT"),
+    internalLlmHost: (env.INTERNAL_LLM_HOST || "127.0.0.1").trim(),
+    internalLlmAllowCidrs: (env.INTERNAL_LLM_ALLOW_CIDRS ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
     refDir: path.resolve(env.REF_DIR && env.REF_DIR.trim() ? env.REF_DIR : defaultRefDir()),
     publishPagePriceUnits,
     serveEndpointPriceUnits,
@@ -325,6 +348,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       see_page: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
       crawl_site: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
       read_feed: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
+      browse: 0,
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),

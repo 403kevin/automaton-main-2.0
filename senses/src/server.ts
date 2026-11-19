@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { readFeed, knownFeedSource } from "../feeds/index.ts";
 import type { FeedContext } from "../feeds/fetch.ts";
 import { DEFAULT_REDDIT_USER_AGENT } from "../feeds/types.ts";
+import { runBrowseScript, type BrowseJob } from "./browse-run.ts";
 import { crawlSite, defaultLoadDocument, MAX_CRAWL_PAGES, type LoadDocument } from "./crawl.ts";
 import { type BrowseRequest, type PageView, SeeError } from "./contract.ts";
 import { SerialQueue } from "./queue.ts";
@@ -30,6 +31,7 @@ export interface SensesServerOptions {
   feedNow?: () => number;
   feedSleep?: (ms: number) => Promise<void>;
   redditUserAgent?: string;
+  runBrowse?: (input: BrowseJob) => Promise<Record<string, unknown>>;
 }
 
 interface JobResult {
@@ -74,6 +76,11 @@ export function createSensesServer(options: SensesServerOptions = {}): http.Serv
         send(res, result.status, result.body);
         return;
       }
+      if (req.method === "POST" && (req.url === "/browse" || req.url === "/browse/")) {
+        const result = await queue.run(() => handleBrowse(req, options.runBrowse ?? runBrowseScript));
+        send(res, result.status, result.body);
+        return;
+      }
       send(res, 404, { error: "Not found." });
     } catch (error) {
       const message = error instanceof Error ? error.message : "see failed";
@@ -81,6 +88,49 @@ export function createSensesServer(options: SensesServerOptions = {}): http.Serv
       if (!res.headersSent) send(res, status, { error: message });
     }
   });
+}
+
+const BROWSE_HARD_STEPS = 15;
+
+async function handleBrowse(
+  req: http.IncomingMessage,
+  run: (input: BrowseJob) => Promise<Record<string, unknown>>,
+): Promise<JobResult> {
+  const parsed = await readJson(req);
+  if (!parsed.ok) return parsed.result;
+  const record = parsed.record;
+  const task = typeof record.task === "string" ? record.task.trim() : "";
+  if (!task) return { status: 400, body: { error: "task is required." } };
+  if (task.length > 4_000) return { status: 400, body: { error: "task is too long." } };
+  const maxSteps = readBrowseSteps(record.max_steps);
+  if (!maxSteps.ok) return { status: 400, body: { error: maxSteps.error } };
+  const denyHosts = Array.isArray(record.denyHosts)
+    ? record.denyHosts.filter((item): item is string => typeof item === "string")
+    : [];
+  const job: BrowseJob = {
+    task,
+    maxSteps: maxSteps.value,
+    denyHosts,
+    llmBaseUrl: typeof record.llm_base_url === "string" ? record.llm_base_url : "",
+    llmToken: typeof record.llm_token === "string" ? record.llm_token : "",
+    model: typeof record.model === "string" ? record.model : "",
+  };
+  try {
+    const result = await run(job);
+    return { status: 200, body: result };
+  } catch (error) {
+    if (error instanceof SeeError) return { status: error.status, body: { error: error.message } };
+    const message = error instanceof Error ? error.message : "browse failed";
+    return { status: 502, body: { error: message } };
+  }
+}
+
+function readBrowseSteps(value: unknown): { ok: true; value: number } | { ok: false; error: string } {
+  if (value === undefined) return { ok: true, value: BROWSE_HARD_STEPS };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    return { ok: false, error: `max_steps must be an integer from 1 to ${BROWSE_HARD_STEPS}.` };
+  }
+  return { ok: true, value: Math.min(value, BROWSE_HARD_STEPS) };
 }
 
 async function handleFeed(

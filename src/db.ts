@@ -92,7 +92,8 @@ CREATE TABLE IF NOT EXISTS endpoints (
 
 CREATE TABLE IF NOT EXISTS nonces (
   nonce TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'used'
 );
 
 CREATE TABLE IF NOT EXISTS kv (
@@ -112,7 +113,82 @@ CREATE INDEX IF NOT EXISTS spend_day ON spend(day, agent_id);
 export function openDatabase(file: string): DatabaseSync {
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
+  ensureNonceStatus(db);
   return db;
+}
+
+/** A pending reservation older than this is a crashed handler, not a live payment. */
+export const NONCE_PENDING_TTL_MS = 60_000;
+
+const REPLAY = "Payment nonce was already used.";
+
+function ensureNonceStatus(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(nonces)").all() as unknown as { name: string }[];
+  if (!cols.some((col) => col.name === "status")) {
+    db.exec("ALTER TABLE nonces ADD COLUMN status TEXT NOT NULL DEFAULT 'used'");
+  }
+}
+
+/**
+ * Reserve a nonce as pending inside one immediate transaction.
+ * The primary key is the lock: a second pending or used nonce fails before any handler starts.
+ * Pending rows older than 60s are deleted first so a crash cannot stick the buyer.
+ */
+export function reservePaymentNonce(
+  db: DatabaseSync,
+  nonce: string,
+  now: number,
+): { ok: true } | { ok: false; error: string } {
+  if (!nonce || nonce.length > 200) return { ok: false, error: REPLAY };
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("DELETE FROM nonces WHERE status = 'pending' AND created_at <= ?").run(now - NONCE_PENDING_TTL_MS);
+    const legacy = db.prepare("SELECT value FROM kv WHERE key = ?").get(`nonce:${nonce}`) as { value: string } | undefined;
+    if (legacy) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: REPLAY };
+    }
+    const row = db.prepare("SELECT status FROM nonces WHERE nonce = ?").get(nonce) as { status: string } | undefined;
+    if (row) {
+      db.exec("ROLLBACK");
+      return { ok: false, error: REPLAY };
+    }
+    db.prepare("INSERT INTO nonces (nonce, created_at, status) VALUES (?, ?, 'pending')").run(nonce, now);
+    db.exec("COMMIT");
+    return { ok: true };
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // The transaction was already closed.
+    }
+    const message = error instanceof Error ? error.message : "Could not reserve the payment nonce.";
+    if (/UNIQUE|constraint/i.test(message)) return { ok: false, error: REPLAY };
+    return { ok: false, error: message };
+  }
+}
+
+/** Drop a pending reservation so the buyer can retry. Used rows stay. */
+export function releasePaymentNonce(db: DatabaseSync, nonce: string): void {
+  db.prepare("DELETE FROM nonces WHERE nonce = ? AND status = 'pending'").run(nonce);
+}
+
+export function releaseStalePaymentNonces(db: DatabaseSync, now: number): number {
+  const result = db
+    .prepare("DELETE FROM nonces WHERE status = 'pending' AND created_at <= ?")
+    .run(now - NONCE_PENDING_TTL_MS);
+  return Number(result.changes);
+}
+
+/** Call inside the same transaction as the ledger credit. Throws if the nonce is not pending. */
+export function markNonceUsed(db: DatabaseSync, nonce: string, now: number): void {
+  const result = db
+    .prepare("UPDATE nonces SET status = 'used', created_at = ? WHERE nonce = ? AND status = 'pending'")
+    .run(now, nonce);
+  if (result.changes !== 1) throw new Error(REPLAY);
+  db.prepare(
+    "INSERT INTO kv (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).run(`nonce:${nonce}`);
 }
 
 interface AgentRow {

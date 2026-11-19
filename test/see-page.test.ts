@@ -38,6 +38,10 @@ class Probe implements SensesClient {
     throw new Error("feed was not stubbed");
   }
 
+  async browse(): Promise<import("../src/senses-client.js").BrowseTaskResult> {
+    throw new Error("browse was not stubbed");
+  }
+
   async see(input: SeePageRequest): Promise<SeePageResult> {
     this.calls += 1;
     this.balanceAtCall.push(this.balance());

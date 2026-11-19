@@ -8,7 +8,22 @@ import type { Clock } from "./clock.js";
 import type { AppConfig } from "./config.js";
 import { CONSTITUTION_TEXT, constitutionDenyHosts, reviewCommand, reviewText, reviewUrl } from "./constitution.js";
 import { DatabaseSync } from "node:sqlite";
-import { countEndpoints, countPages, getAgent, getAgentByAddress, getEndpoint, getPage, getService, kvGet, kvSet, listAgents, listPages as listPageRows } from "./db.js";
+import {
+  countEndpoints,
+  countPages,
+  getAgent,
+  getAgentByAddress,
+  getEndpoint,
+  getPage,
+  getService,
+  kvGet,
+  kvSet,
+  listAgents,
+  listPages as listPageRows,
+  markNonceUsed,
+  releasePaymentNonce,
+  reservePaymentNonce,
+} from "./db.js";
 import { handlerSnapshotRoot, MAX_ENDPOINTS_PER_AGENT, snapshotHandlerDir } from "./handlers.js";
 import { isPublicSlug, MAX_PAGE_BYTES, MAX_PAGES_PER_AGENT } from "./pages.js";
 import { DEFAULT_GENESIS } from "./genesis.js";
@@ -18,6 +33,7 @@ import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
 import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
 import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
+import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
@@ -71,6 +87,8 @@ interface PostInput {
   note: string;
   allowNegative?: boolean;
   category?: SpendCategory;
+  /** When set, the caller already holds a transaction and will commit or roll it back. */
+  inTransaction?: boolean;
 }
 
 export class Swarm {
@@ -83,6 +101,7 @@ export class Swarm {
   private settler: PaymentSettler | null = null;
   private reportTimer: ReturnType<typeof setInterval> | null = null;
   private readonly sensesClient: SensesClient;
+  private browseLlm: BrowseLlmPort | null = null;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -115,6 +134,10 @@ export class Swarm {
 
   setSettler(settler: PaymentSettler): void {
     this.settler = settler;
+  }
+
+  setBrowseLlm(llm: BrowseLlmPort): void {
+    this.browseLlm = llm;
   }
 
   startScheduler(): void {
@@ -315,7 +338,14 @@ export class Swarm {
     return { ok: true, value: { balance: agent.balanceUnits } };
   }
 
-  debit(agentId: string, units: number, category: SpendCategory, ref: string, note: string): Result<{ balance: number; duplicate?: boolean }> {
+  debit(
+    agentId: string,
+    units: number,
+    category: SpendCategory,
+    ref: string,
+    note: string,
+    inTransaction = false,
+  ): Result<{ balance: number; duplicate?: boolean }> {
     if (units <= 0) return { ok: false, error: "Debit must be positive." };
     return this.post({
       agentId,
@@ -324,6 +354,7 @@ export class Swarm {
       ref,
       note,
       category,
+      inTransaction,
     });
   }
 
@@ -507,6 +538,7 @@ export class Swarm {
     if (call.name === "see_page") return this.seePage(agentId, call);
     if (call.name === "crawl_site") return this.crawlSite(agentId, call);
     if (call.name === "read_feed") return this.readFeed(agentId, call);
+    if (call.name === "browse") return this.browseTask(agentId, call);
     if (call.name === "web_search") {
       const query = String(args.query ?? "").slice(0, 300);
       if (!query) return { ok: false, reason: "Query is empty." };
@@ -534,9 +566,18 @@ export class Swarm {
     if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
     const verified = await this.verifyInboundPayment(sellerId, header, service.priceUnits);
     if (!verified.ok) return verified;
-    const settled = await this.commitInboundPayment(sellerId, verified.value);
-    if (!settled.ok) return settled;
-    return { ok: true, value: { body: service.body, txHash: settled.value.txHash } };
+    try {
+      const settled = await this.commitInboundPayment(sellerId, verified.value);
+      if (!settled.ok) return settled;
+      return { ok: true, value: { body: service.body, txHash: settled.value.txHash } };
+    } finally {
+      this.releaseInboundPayment(verified.value.nonce);
+    }
+  }
+
+  /** Drop a pending nonce. A used nonce is left in place. Safe to call after a successful commit. */
+  releaseInboundPayment(nonce: string): void {
+    releasePaymentNonce(this.db, nonce);
   }
 
   /**
@@ -603,10 +644,11 @@ export class Swarm {
     if (payment.from.toLowerCase() === seller.walletAddress.toLowerCase()) {
       return { ok: false, error: "An agent cannot pay itself." };
     }
-    if (kvGet(this.db, `nonce:${payment.nonce}`)) return { ok: false, error: "Payment nonce was already used." };
     const balance = await this.chain.getBalance(payment.from);
     if (!balance.ok) return { ok: false, error: balance.error };
     if (balance.units < payment.units) return { ok: false, error: "Payer's simulated USDC balance is too low." };
+    const reserved = reservePaymentNonce(this.db, payment.nonce, this.clock.now());
+    if (!reserved.ok) return reserved;
     return {
       ok: true,
       value: { mode: "dry", from: payment.from, units: payment.units, nonce: payment.nonce, priceUnits },
@@ -629,7 +671,8 @@ export class Swarm {
     if (message.value !== BigInt(priceUnits)) return { ok: false, error: `Price is ${priceUnits} units.` };
     const verified = await verifyAuthorization(this.config, message, parsed.value.signature);
     if (!verified.ok) return verified;
-    if (kvGet(this.db, `nonce:${message.nonce}`)) return { ok: false, error: "Payment nonce was already used." };
+    const reserved = reservePaymentNonce(this.db, message.nonce, this.clock.now());
+    if (!reserved.ok) return reserved;
     return {
       ok: true,
       value: {
@@ -651,34 +694,38 @@ export class Swarm {
     const payer = getAgentByAddress(this.db, payment.from);
     const moved = await this.chain.transferBetween(payment.from, seller.walletAddress, payment.units);
     if (!moved.ok) return { ok: false, error: moved.error ?? "Transfer failed." };
-    if (payer) {
-      const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${payment.nonce}`, `paid ${seller.name}`);
-      if (!debited.ok) {
-        await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
-        return debited;
-      }
-    }
-    const credited = this.post({
-      agentId: seller.id,
-      kind: "x402_in",
-      amount: payment.priceUnits,
-      ref: `x402-in:${payment.nonce}`,
-      note: `from ${payment.from}`,
-    });
-    if (!credited.ok) {
-      await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
+    // The ledger credit and the nonce mark commit together. No await inside this block,
+    // so a second request cannot start its own transaction in the gap.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
       if (payer) {
-        this.post({
-          agentId: payer.id,
-          kind: "owner_topup",
-          amount: payment.priceUnits,
-          ref: `refund:${payment.nonce}`,
-          note: "refund after a failed x402 credit",
-        });
+        const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${payment.nonce}`, `paid ${seller.name}`, true);
+        if (!debited.ok) throw new Error(debited.error);
+        if (debited.value.duplicate) throw new Error("Payment nonce was already used.");
       }
-      return credited;
+      const credited = this.post({
+        agentId: seller.id,
+        kind: "x402_in",
+        amount: payment.priceUnits,
+        ref: `x402-in:${payment.nonce}`,
+        note: `from ${payment.from}`,
+        inTransaction: true,
+      });
+      if (!credited.ok) throw new Error(credited.error);
+      if (credited.value.duplicate) throw new Error("Payment nonce was already used.");
+      markNonceUsed(this.db, payment.nonce, this.clock.now());
+      kvSet(this.db, nonceKey, "1");
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // already closed
+      }
+      await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
+      const message = error instanceof Error ? error.message : "Payment commit failed.";
+      return { ok: false, error: message };
     }
-    kvSet(this.db, nonceKey, "1");
     this.event(seller.id, "x402_in", `Paid ${formatUsd(payment.priceUnits)} by ${payment.from}`);
     return { ok: true, value: { txHash: moved.txHash } };
   }
@@ -688,20 +735,39 @@ export class Swarm {
     const settler = this.settler ?? new SimulatedSettler(this.chain);
     const settled = await settler.settle(payment.message, payment.signature);
     if (!settled.ok) return { ok: false, error: settled.error };
-    const credited = this.post({
-      agentId: seller.id,
-      kind: "x402_in",
-      amount: payment.priceUnits,
-      ref: `onchain:${settled.txHash}`,
-      note: `x402 from ${payment.from}`,
-    });
-    if (!credited.ok) return credited;
-    const payer = getAgentByAddress(this.db, payment.from);
-    if (payer) {
-      const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${settled.txHash}`, `paid ${seller.name}`);
-      if (!debited.ok) this.event(payer.id, "ledger_drift", `Settlement ${settled.txHash} confirmed but the payer ledger debit failed: ${debited.error}`);
+    let drift = "";
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const credited = this.post({
+        agentId: seller.id,
+        kind: "x402_in",
+        amount: payment.priceUnits,
+        ref: `onchain:${settled.txHash}`,
+        note: `x402 from ${payment.from}`,
+        inTransaction: true,
+      });
+      if (!credited.ok) throw new Error(credited.error);
+      const payer = getAgentByAddress(this.db, payment.from);
+      if (payer) {
+        const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${settled.txHash}`, `paid ${seller.name}`, true);
+        if (!debited.ok) {
+          drift = `Settlement ${settled.txHash} confirmed but the payer ledger debit failed: ${debited.error}`;
+        }
+      }
+      markNonceUsed(this.db, payment.nonce, this.clock.now());
+      kvSet(this.db, nonceKey, settled.txHash);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // already closed
+      }
+      const message = error instanceof Error ? error.message : "Payment commit failed.";
+      return { ok: false, error: message };
     }
-    kvSet(this.db, nonceKey, settled.txHash);
+    const payer = getAgentByAddress(this.db, payment.from);
+    if (drift && payer) this.event(payer.id, "ledger_drift", drift);
     this.event(seller.id, "x402_in", `Settled ${formatUsd(payment.priceUnits)} in ${settled.txHash}.`);
     return { ok: true, value: { txHash: settled.txHash } };
   }
@@ -1488,6 +1554,171 @@ export class Swarm {
     );
   }
 
+  private async browseTask(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const task = String(call.arguments?.task ?? "").trim();
+    if (!this.config.browseEnabled) {
+      this.noteBrowse(agentId, task, 0, [], 0, "refused");
+      return { ok: false, reason: "browse is disabled by the owner" };
+    }
+    if (!task || task.length > 4_000) {
+      this.noteBrowse(agentId, task, 0, [], 0, "refused");
+      return { ok: false, reason: task ? "task is too long." : "task is required." };
+    }
+    const review = reviewText(task);
+    if (!review.allowed) {
+      this.noteBrowse(agentId, task, 0, [], 0, "refused");
+      return this.blocked(agentId, `Law ${review.law}: ${review.reason}`);
+    }
+    const maxSteps = this.readBrowseSteps(call.arguments?.max_steps);
+    if (this.browseUses(agentId) >= this.config.browseHourlyLimit) {
+      const reason = `browse hourly limit is ${this.config.browseHourlyLimit}.`;
+      this.noteBrowse(agentId, task, 0, [], 0, "limit");
+      return { ok: false, reason };
+    }
+    const preauth = maxSteps * this.config.browseStepPriceUnits + this.config.browseLlmReserveUnits;
+    const reserved = this.authorize(agentId, preauth, "tool");
+    if (!reserved.ok) {
+      this.noteBrowse(agentId, task, 0, [], 0, "unaffordable");
+      return { ok: false, reason: reserved.error };
+    }
+    if (!this.browseLlm) {
+      this.noteBrowse(agentId, task, 0, [], 0, "refused");
+      return { ok: false, reason: "browse llm proxy is not configured." };
+    }
+    const debited = preauth > 0 ? this.debit(agentId, preauth, "tool", `tool:${call.id}`, "browse") : { ok: true as const, value: { balance: agent.balanceUnits } };
+    if (!debited.ok) {
+      this.noteBrowse(agentId, task, 0, [], 0, "unaffordable");
+      return { ok: false, reason: debited.error };
+    }
+    if (debited.value.duplicate) return { ok: false, reason: "browse call was already billed." };
+    const snapshot = this.snapshot(agentId);
+    const token = this.browseLlm.issue({ agentId, model: snapshot.model, now: this.clock.now() });
+    const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
+    let llmCost = 0;
+    try {
+      const result = await this.sensesClient.browse({
+        task,
+        maxSteps,
+        denyHosts,
+        llmBaseUrl: this.config.sensesLlmBaseUrl,
+        llmToken: token,
+        model: snapshot.model,
+      });
+      llmCost = this.browseLlm.close(token);
+      const steps = Math.min(maxSteps, Math.max(0, Math.floor(result.steps)));
+      const stepCost = steps * this.config.browseStepPriceUnits;
+      const llmCharged = Math.min(Math.max(0, llmCost), this.config.browseLlmReserveUnits);
+      const actual = Math.min(preauth, stepCost + llmCharged);
+      const refund = preauth - actual;
+      if (refund > 0) this.refundBrowse(agentId, refund, call.id);
+      const saved = this.saveBrowse(agent.workspace, { task, steps, urls: result.urls, costUnits: actual, llmCostUnits: llmCost, outcome: result.outcome, result: result.result, transcript: result.transcript });
+      if (!saved.ok) {
+        if (actual > 0) this.refundBrowse(agentId, actual, `${call.id}:save`);
+        this.noteBrowse(agentId, task, 0, result.urls, 0, "error");
+        return { ok: false, reason: saved.error };
+      }
+      this.noteBrowse(agentId, task, steps, result.urls, actual, result.outcome || "ok", saved.path);
+      const text = [result.result, result.urls.join("\n"), `steps ${steps}`, `Saved browse to ${saved.path}.`].filter((part) => part && part.trim()).join("\n\n");
+      return { ok: true, handled: true, output: text.slice(0, 8000) };
+    } catch (error) {
+      try {
+        llmCost = this.browseLlm.close(token);
+      } catch {
+        llmCost = 0;
+      }
+      this.refundBrowse(agentId, preauth, call.id);
+      this.noteBrowse(agentId, task, 0, [], 0, "error");
+      const reason = error instanceof Error ? error.message : "browse failed.";
+      return { ok: false, reason: reason.slice(0, 300) };
+    }
+  }
+
+  private readBrowseSteps(value: unknown): number {
+    const cap = Math.min(15, Math.max(1, Math.floor(this.config.browseMaxSteps) || 15));
+    if (value === undefined || value === null || value === "") return cap;
+    const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+    if (!Number.isFinite(parsed)) return cap;
+    const whole = Math.floor(parsed);
+    if (whole < 1) return cap;
+    return Math.min(whole, cap);
+  }
+
+  private browseUses(agentId: string): number {
+    const since = this.clock.now() - 3_600_000;
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM ledger_entries WHERE agent_id = ? AND note = 'browse' AND amount_units < 0 AND created_at > ?",
+      )
+      .get(agentId, since) as { n: number };
+    return row.n;
+  }
+
+  private refundBrowse(agentId: string, units: number, callId: string): void {
+    if (units <= 0) return;
+    const posted = this.post({
+      agentId,
+      kind: "tool",
+      amount: units,
+      ref: `refund:browse:${callId}`,
+      note: "browse refund",
+    });
+    if (!posted.ok || posted.value.duplicate) return;
+    this.db
+      .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'tool', ?, ?)")
+      .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
+  }
+
+  private saveBrowse(
+    workspace: string,
+    record: {
+      task: string;
+      steps: number;
+      urls: string[];
+      costUnits: number;
+      llmCostUnits: number;
+      outcome: string;
+      result: string;
+      transcript: unknown;
+    },
+  ): { ok: true; path: string } | { ok: false; error: string } {
+    const payload = JSON.stringify(record, null, 2);
+    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-browse.json`;
+    const relative = `evidence/${name}`;
+    const dest = path.join(workspace, "evidence", name);
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save the browse.";
+      return { ok: false, error: message };
+    }
+    return { ok: true, path: relative };
+  }
+
+  private noteBrowse(
+    agentId: string,
+    task: string,
+    steps: number,
+    urls: string[],
+    cost: number,
+    outcome: string,
+    evidence = "",
+  ): void {
+    const extra = evidence ? ` evidence=${evidence}` : "";
+    const flat = task.replace(/\s+/g, " ").slice(0, 120);
+    const visited = urls.slice(0, 8).join(",");
+    this.event(
+      agentId,
+      "browse",
+      `outcome=${outcome} cost=${cost} steps=${steps} urls=${visited} task=${flat}${extra}`,
+    );
+  }
+
   private chargeTool(agentId: string, name: string, callId: string): Result<{ balance: number }> {
     const cost = this.config.toolCosts[name] ?? 0;
     if (cost === 0) return { ok: true, value: { balance: getAgent(this.db, agentId)?.balanceUnits ?? 0 } };
@@ -1629,22 +1860,26 @@ export class Swarm {
 
   private post(input: PostInput): Result<{ balance: number; duplicate?: boolean }> {
     const now = this.clock.now();
-    this.db.exec("BEGIN IMMEDIATE");
+    const owns = !input.inTransaction;
+    if (owns) this.db.exec("BEGIN IMMEDIATE");
+    const rollback = () => {
+      if (owns) this.db.exec("ROLLBACK");
+    };
     try {
       const agent = getAgent(this.db, input.agentId);
       if (!agent) {
-        this.db.exec("ROLLBACK");
+        rollback();
         return { ok: false, error: "Unknown agent." };
       }
       if (agent.status === "archived") {
-        this.db.exec("ROLLBACK");
+        rollback();
         return { ok: false, error: "Agent is archived." };
       }
       const existing = this.db
         .prepare("SELECT balance_after FROM ledger_entries WHERE agent_id = ? AND ref = ?")
         .get(input.agentId, input.ref) as { balance_after: number } | undefined;
       if (existing) {
-        this.db.exec("ROLLBACK");
+        rollback();
         return { ok: true, value: { balance: agent.balanceUnits, duplicate: true } };
       }
       if (input.category) {
@@ -1659,13 +1894,13 @@ export class Swarm {
           allowNegative: false,
         });
         if (!decision.ok) {
-          this.db.exec("ROLLBACK");
+          rollback();
           return { ok: false, error: decision.reason ?? "Spend refused." };
         }
       }
       const next = agent.balanceUnits + input.amount;
       if (next < 0 && !input.allowNegative) {
-        this.db.exec("ROLLBACK");
+        rollback();
         return { ok: false, error: "Balance is too low." };
       }
       this.db
@@ -1684,12 +1919,12 @@ export class Swarm {
           .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(input.agentId, Math.abs(input.amount), input.category, dayKey(now), now);
       }
-      this.db.exec("COMMIT");
+      if (owns) this.db.exec("COMMIT");
       if (recover) this.event(input.agentId, "recovered", "Top-up cleared the grace period.");
       return { ok: true, value: { balance: next, duplicate: false } };
     } catch (error) {
       try {
-        this.db.exec("ROLLBACK");
+        rollback();
       } catch {
         // already closed
       }

@@ -227,8 +227,9 @@ describe("senses compose", () => {
     expect(senses).toContain('max-size: "10m"');
     expect(senses).toContain('max-file: "3"');
     expect(orchestrator).toContain("SENSES_URL: http://senses:7070");
-    expect(orchestrator).toContain("- default");
-    expect(orchestrator).toContain("- senses");
+    expect(orchestrator).toContain("default:");
+    expect(orchestrator).toContain("senses:");
+    expect(orchestrator).toContain("ipv4_address: 172.31.210.10");
     expect(safe).toContain('cpus: "1.0"');
     expect(safe).toContain("memory: 1g");
     expect(safe).toContain("json-file");

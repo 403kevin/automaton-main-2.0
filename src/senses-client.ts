@@ -75,10 +75,28 @@ export interface FeedResult {
   reason?: string;
 }
 
+export interface BrowseTaskRequest {
+  task: string;
+  maxSteps: number;
+  denyHosts: string[];
+  llmBaseUrl: string;
+  llmToken: string;
+  model: string;
+}
+
+export interface BrowseTaskResult {
+  result: string;
+  steps: number;
+  urls: string[];
+  transcript: unknown;
+  outcome: string;
+}
+
 export interface SensesClient {
   see(input: SeePageRequest): Promise<SeePageResult>;
   crawl(input: CrawlSiteRequest): Promise<CrawlSiteResult>;
   feed(input: FeedRequest): Promise<FeedResult>;
+  browse(input: BrowseTaskRequest): Promise<BrowseTaskResult>;
 }
 
 const MAX_BODY_BYTES = 2_000_000;
@@ -139,6 +157,30 @@ export class HttpSensesClient implements SensesClient {
       : [];
     const robots = record.robots === "ok" || record.robots === "missing" || record.robots === "unreachable" ? record.robots : "missing";
     return { pages, skipped, robots };
+  }
+
+  async browse(input: BrowseTaskRequest): Promise<BrowseTaskResult> {
+    const record = await this.post(
+      "/browse",
+      {
+        task: input.task,
+        max_steps: input.maxSteps,
+        denyHosts: input.denyHosts,
+        llm_base_url: input.llmBaseUrl,
+        llm_token: input.llmToken,
+        model: input.model,
+      },
+      190_000,
+    );
+    const urls = Array.isArray(record.urls) ? record.urls.filter((item): item is string => typeof item === "string") : [];
+    const steps = typeof record.steps === "number" && Number.isFinite(record.steps) ? Math.max(0, Math.floor(record.steps)) : 0;
+    return {
+      result: typeof record.result === "string" ? record.result : "",
+      steps,
+      urls,
+      transcript: record.transcript ?? [],
+      outcome: typeof record.outcome === "string" ? record.outcome : "ok",
+    };
   }
 
   async feed(input: FeedRequest): Promise<FeedResult> {

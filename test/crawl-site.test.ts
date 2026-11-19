@@ -525,6 +525,10 @@ class LedgerProbe implements SensesClient {
     throw new Error("feed was not stubbed");
   }
 
+  async browse(): Promise<import("../src/senses-client.js").BrowseTaskResult> {
+    throw new Error("browse was not stubbed");
+  }
+
   async crawl(input: CrawlSiteRequest): Promise<CrawlSiteResult> {
     this.calls += 1;
     this.balanceAtCall.push(this.balance());

@@ -6,6 +6,7 @@ import { HandlerSandbox, handlerHttpStatus, handlerSnapshotRoot } from "./handle
 import type { DirectHost } from "./host.js";
 import { parseUsd } from "./money.js";
 import { classifyAgentRoute, renderPageIndex, renderPublishedPage } from "./pages.js";
+import { type BrowseLlmProxy, startInternalLlmServer } from "./llm-proxy.js";
 import { caipNetwork, encodeHeaderValue, paymentRequirements, X402_HEADERS } from "./x402.js";
 import type { Swarm } from "./swarm.js";
 import { redact } from "./redact.js";
@@ -22,6 +23,7 @@ export function startServer(input: {
   host: DirectHost;
   handlers?: HandlerSandbox;
   background?: boolean;
+  llmProxy?: BrowseLlmProxy;
 }): Promise<ServerHandle> {
   const { config, swarm, host } = input;
   const handlers = input.handlers ?? defaultHandlers(config);
@@ -31,7 +33,12 @@ export function startServer(input: {
       send(res, 500, { error: message });
     });
   });
-  return new Promise((resolve, reject) => {
+  const internalReady = input.llmProxy
+    ? startInternalLlmServer(input.llmProxy, config.internalLlmPort, config.internalLlmHost)
+    : Promise.resolve(null);
+  return internalReady.then(
+    (internal) =>
+      new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
       if (input.background !== false) {
@@ -48,14 +55,26 @@ export function startServer(input: {
           new Promise((done, fail) => {
             void handlers.shutdown().finally(() => {
               void swarm.haltBodies().finally(() => {
-                server.closeAllConnections();
-                server.close((error) => (error ? fail(error) : done()));
+                const finish = () => {
+                  server.closeAllConnections();
+                  server.close((error) => (error ? fail(error) : done()));
+                };
+                if (!internal) {
+                  finish();
+                  return;
+                }
+                void internal.close().finally(finish);
               });
             });
           }),
       });
     });
-  });
+  }),
+    (error) => {
+      server.close();
+      return Promise.reject(error);
+    },
+  );
 }
 
 function defaultHandlers(config: AppConfig): HandlerSandbox {
@@ -278,53 +297,58 @@ async function serveEndpoint(
     if (query[key] !== undefined) continue;
     query[key] = value;
   }
-  const ran = await handlers.run({
-    snapshotHash: endpoint.snapshotHash,
-    stdin: JSON.stringify({ method: req.method ?? "GET", path: `/a/${agentId}/${name}`, query, body: body.text }),
-  });
-  if (!ran.ok) {
+  try {
+    const ran = await handlers.run({
+      snapshotHash: endpoint.snapshotHash,
+      stdin: JSON.stringify({ method: req.method ?? "GET", path: `/a/${agentId}/${name}`, query, body: body.text }),
+    });
+    if (!ran.ok) {
+      swarm.recordEndpointCall({
+        agentId,
+        endpoint: name,
+        priceUnits: endpoint.priceUnits,
+        outcome: ran.code,
+        durationMs: ran.durationMs,
+        bytesOut: ran.bytesOut,
+        failed: ran.code !== "busy",
+      });
+      return send(res, handlerHttpStatus(ran.code), { error: ran.publicReason });
+    }
+    const settled = await swarm.commitInboundPayment(agentId, verified.value);
+    if (!settled.ok) {
+      swarm.recordEndpointCall({
+        agentId,
+        endpoint: name,
+        priceUnits: endpoint.priceUnits,
+        outcome: "settlement",
+        durationMs: ran.durationMs,
+        bytesOut: ran.bytesOut,
+        failed: true,
+      });
+      return send(res, 502, { error: "Settlement failed. The buyer was not charged." });
+    }
     swarm.recordEndpointCall({
       agentId,
       endpoint: name,
       priceUnits: endpoint.priceUnits,
-      outcome: ran.code,
+      outcome: "ok",
       durationMs: ran.durationMs,
       bytesOut: ran.bytesOut,
-      failed: ran.code !== "busy",
+      failed: false,
     });
-    return send(res, handlerHttpStatus(ran.code), { error: ran.publicReason });
-  }
-  const settled = await swarm.commitInboundPayment(agentId, verified.value);
-  if (!settled.ok) {
-    swarm.recordEndpointCall({
-      agentId,
-      endpoint: name,
-      priceUnits: endpoint.priceUnits,
-      outcome: "settlement",
-      durationMs: ran.durationMs,
-      bytesOut: ran.bytesOut,
-      failed: true,
+    const receipt = { success: true, transaction: settled.value.txHash ?? "", network: caipNetwork(config) };
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+      [X402_HEADERS.response]: encodeHeaderValue(receipt),
+      "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
+      "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
     });
-    return send(res, 502, { error: "Settlement failed. The buyer was not charged." });
+    res.end(ran.output);
+  } finally {
+    // Pending only. A committed nonce is status=used and is not deleted.
+    swarm.releaseInboundPayment(verified.value.nonce);
   }
-  swarm.recordEndpointCall({
-    agentId,
-    endpoint: name,
-    priceUnits: endpoint.priceUnits,
-    outcome: "ok",
-    durationMs: ran.durationMs,
-    bytesOut: ran.bytesOut,
-    failed: false,
-  });
-  const receipt = { success: true, transaction: settled.value.txHash ?? "", network: caipNetwork(config) };
-  res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8",
-    "X-Content-Type-Options": "nosniff",
-    [X402_HEADERS.response]: encodeHeaderValue(receipt),
-    "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
-    "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
-  });
-  res.end(ran.output);
 }
 
 function writePaymentRequired(res: ServerResponse, challenge: Record<string, unknown>): void {

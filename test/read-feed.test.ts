@@ -450,6 +450,10 @@ class FeedProbe implements SensesClient {
     throw new Error("crawl was not stubbed");
   }
 
+  async browse(): Promise<import("../src/senses-client.js").BrowseTaskResult> {
+    throw new Error("browse was not stubbed");
+  }
+
   async feed(input: FeedRequest): Promise<FeedResult> {
     this.calls += 1;
     this.balanceAtCall.push(this.balance());
