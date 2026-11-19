@@ -1,0 +1,22 @@
+[
+  { "data": { "children": [] } },
+  {
+    "data": {
+      "children": [
+        {
+          "kind": "t1",
+          "data": {
+            "id": "c1",
+            "name": "t1_c1",
+            "body": "A comment.",
+            "author": "commenter",
+            "score": 2,
+            "permalink": "/r/test/comments/abc123/keyfree_json/c1/",
+            "link_title": "Key-free JSON",
+            "created_utc": 1700001000
+          }
+        }
+      ]
+    }
+  }
+]

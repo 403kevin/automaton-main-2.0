@@ -134,6 +134,28 @@ It seeds URLs from `Sitemap:` lines, or from `/sitemap.xml` when none are listed
 
 The orchestrator checks the constitution before it charges anything. That refusal costs nothing. It then reserves `max_pages` × `CRAWL_PAGE_PRICE_USD` ($0.001 per page) and refuses, still at no cost, when the agent cannot cover the reserve. Afterward it keeps the charge only for pages actually fetched. Zero pages cost nothing. A senses error refunds the reserve. Each agent may start `CRAWL_HOURLY_LIMIT` crawls an hour (default 5). Over the limit is refused and costs nothing. The full JSON is saved at `evidence/<timestamp>-<short-hash>-crawl.json`. The tool result sent back is the titles, the URLs, and about the first 2000 characters of each page. One event row records the agent, the start URL, pages fetched, pages skipped, the cost, and the outcome.
 
+## Senses: read_feed
+
+`read_feed` listens to a free public feed through that same service. It takes `source`, `query`, and optional `options`. Sources, all keyless:
+
+- `hn` — Hacker News Algolia search
+- `bluesky` — Bluesky public AppView search
+- `wikipedia` — MediaWiki search
+- `wikimedia-pageviews` — Wikimedia REST per-article pageviews
+- `arxiv` — arXiv Atom export
+- `archive` — Archive.org advanced search
+- `rss` — an http(s) RSS or Atom URL
+- `x402-bazaar` — Coinbase x402 discovery search
+- `reddit` — public JSON only (`/search.json`, `/r/<sub>/search.json`, `/r/<sub>/new.json`, and a post's `.json`)
+
+There is no X/Twitter adapter. Each call returns at most 25 items. Upstream responses are capped at 2 MB and 15 seconds. Every URL goes through the same private-network and deny-list checks as `see_page`.
+
+The orchestrator checks the source, and for `rss` the URL, before it charges anything. An unknown source is refused with `unknown source`. A private or denied URL is refused. Those refusals cost nothing. An allowed call is then debited `READ_FEED_PRICE_USD` ($0.0005). A senses error refunds that debit. Each agent may call it `READ_FEED_HOURLY_LIMIT` times an hour (default 60). Over the limit is refused and costs nothing. The full JSON is saved at `evidence/<timestamp>-<short-hash>-feed.json`. One event row records the agent, the source, the query, the item count, the cost, and the outcome.
+
+Reddit is key-free on purpose: no OAuth, no login, no proxy, and no browser fallback. A descriptive `REDDIT_USER_AGENT` is sent (the default names this reader and carries no secret). The adapter allows at most one Reddit request every two seconds across all agents, and it honours `Retry-After`. On 403, 429, or a block page it returns `blocked: true` with the status and a reason, and it does not keep retrying. That blocked result still costs the fee, because the request was made. The event log also gets `feed_blocked` with `source=reddit`. If Bluesky's search answers that authentication is required, the result is `unavailable: requires auth` instead of an error. That completed call keeps the fee too.
+
+`scripts/refresh-ref.sh` downloads two catalogs into `ref/` at deploy time: the public-apis README and the awesome-public-datasets README. The copies in the repo record the fetch date in `ref/SOURCES.md`. Agent containers mount that directory read-only at `/ref`. When the orchestrator itself runs in Docker, set `REF_DIR` to the host path of `ref/`, because the daemon resolves the bind on the host. `read_file` can read `/ref` and cannot write it. It still cannot read other host paths.
+
 ## What is real, and what is not
 
 Real:
@@ -147,6 +169,8 @@ Real:
 - Web search through SearXNG, Brave, Tavily, or Exa, billed to the agent's ledger. Mock search remains the fallback when no URL and no key are set.
 - `see_page` through the shared senses browser, billed to the agent's ledger the same way. No browser API key.
 - `crawl_site` through the same service, billed per page actually fetched. No crawl API key.
+- `read_feed` through the same service, billed per call. No feed API key. Reddit stays on the public JSON endpoints.
+- Read-only reference catalogs mounted at `/ref`.
 - Live USDC balance reads and Transfer log polling.
 - Docker bodies: read-only root, dropped capabilities, memory and pid limits, workspace mount only.
 
@@ -226,5 +250,6 @@ src/chain.ts          dry-run book and live Base USDC
 src/x402.ts           402 payload and signature check
 src/agent/loop.ts     think, act, observe
 src/server.ts         dashboard, admin, paid route, agent API
-senses/               shared fetch and browser for see_page and crawl_site
+senses/               shared fetch, browser, and feeds for see_page, crawl_site, and read_feed
+ref/                  read-only public-apis and dataset catalogs, mounted at /ref
 ```

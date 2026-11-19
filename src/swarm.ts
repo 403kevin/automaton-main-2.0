@@ -14,7 +14,8 @@ import { newId, newToken } from "./ids.js";
 import { dayKey, formatUsd } from "./money.js";
 import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
-import { HttpSensesClient, type CrawlSiteResult, type SensesClient } from "./senses-client.js";
+import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
+import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
@@ -475,9 +476,9 @@ export class Swarm {
     }
     if (call.name === "read_file" || call.name === "write_file") {
       const target = String(args.path ?? "");
-      if (target.includes("..") || path.isAbsolute(target)) {
-        return this.blocked(agentId, "Paths must stay inside the workspace.");
-      }
+      const kind = classifyAgentPath(target);
+      if (kind === "deny") return this.blocked(agentId, "Paths must stay inside the workspace.");
+      if (kind === "ref" && call.name === "write_file") return this.blocked(agentId, "Reference files are read-only.");
       if (call.name === "write_file") {
         const review = reviewText(String(args.content ?? ""));
         if (!review.allowed) return this.blocked(agentId, review.reason);
@@ -488,6 +489,7 @@ export class Swarm {
     }
     if (call.name === "see_page") return this.seePage(agentId, call);
     if (call.name === "crawl_site") return this.crawlSite(agentId, call);
+    if (call.name === "read_feed") return this.readFeed(agentId, call);
     if (call.name === "web_search") {
       const query = String(args.query ?? "").slice(0, 300);
       if (!query) return { ok: false, reason: "Query is empty." };
@@ -1106,6 +1108,137 @@ export class Swarm {
     return { ok: true, path: relative };
   }
 
+  private async readFeed(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const source = String(call.arguments?.source ?? "").trim().toLowerCase();
+    const query = String(call.arguments?.query ?? "").trim();
+    const options = readFeedOptions(call.arguments?.options);
+    if (!(FEED_SOURCE_NAMES as readonly string[]).includes(source)) {
+      this.noteFeed(agentId, source, query, 0, 0, "refused");
+      return { ok: false, reason: "unknown source" };
+    }
+    if (!query || query.length > 2_000) {
+      this.noteFeed(agentId, source, query, 0, 0, "refused");
+      return { ok: false, reason: query ? "query is too long." : "query is required." };
+    }
+    if (source === "rss") {
+      const review = await reviewUrl(query, this.config.denyHosts, this.resolveHost);
+      if (!review.allowed) {
+        this.noteFeed(agentId, source, query, 0, 0, "refused");
+        return this.blocked(agentId, review.reason);
+      }
+    }
+    if (this.feedUses(agentId) >= this.config.readFeedHourlyLimit) {
+      const reason = `read_feed hourly limit is ${this.config.readFeedHourlyLimit}.`;
+      this.noteFeed(agentId, source, query, 0, 0, "limit");
+      return { ok: false, reason };
+    }
+    const cost = this.config.readFeedPriceUnits;
+    const debited = this.debit(agentId, cost, "tool", `tool:${call.id}`, "read_feed");
+    if (!debited.ok) return { ok: false, reason: debited.error };
+    if (debited.value.duplicate) return { ok: false, reason: "read_feed call was already billed." };
+    const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
+    try {
+      const result = await this.sensesClient.feed({
+        source,
+        query,
+        options,
+        denyHosts,
+        userAgent: this.config.redditUserAgent,
+      });
+      const saved = this.saveFeed(agent.workspace, result);
+      // A reddit block is a completed request, so the fee stays. Senses errors refund below.
+      if (result.blocked) {
+        this.noteFeedBlocked(agentId, source, result.status ?? 0, result.reason ?? "blocked");
+        this.noteFeed(agentId, source, query, 0, cost, "blocked", saved.ok ? saved.path : "");
+        return { ok: true, handled: true, output: presentFeed(result, saved.ok ? saved.path : "") };
+      }
+      if (!saved.ok) {
+        this.refundFeed(agentId, cost, call.id);
+        this.noteFeed(agentId, source, query, 0, 0, "error");
+        return { ok: false, reason: saved.error };
+      }
+      const outcome = result.unavailable ? "unavailable" : "ok";
+      this.noteFeed(agentId, source, query, result.items.length, cost, outcome, saved.path);
+      return { ok: true, handled: true, output: presentFeed(result, saved.path) };
+    } catch (error) {
+      this.refundFeed(agentId, cost, call.id);
+      this.noteFeed(agentId, source, query, 0, 0, "error");
+      const reason = error instanceof Error ? error.message : "read_feed failed.";
+      return { ok: false, reason: reason.slice(0, 300) };
+    }
+  }
+
+  private feedUses(agentId: string): number {
+    const since = this.clock.now() - 3_600_000;
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM ledger_entries WHERE agent_id = ? AND note = 'read_feed' AND amount_units < 0 AND created_at > ?",
+      )
+      .get(agentId, since) as { n: number };
+    return row.n;
+  }
+
+  private refundFeed(agentId: string, units: number, callId: string): void {
+    if (units <= 0) return;
+    const posted = this.post({
+      agentId,
+      kind: "tool",
+      amount: units,
+      ref: `refund:read_feed:${callId}`,
+      note: "read_feed refund",
+    });
+    if (!posted.ok || posted.value.duplicate) return;
+    this.db
+      .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'tool', ?, ?)")
+      .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
+  }
+
+  private saveFeed(
+    workspace: string,
+    result: FeedResult,
+  ): { ok: true; path: string } | { ok: false; error: string } {
+    const payload = JSON.stringify(result, null, 2);
+    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-feed.json`;
+    const relative = `evidence/${name}`;
+    const dest = path.join(workspace, "evidence", name);
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save the feed.";
+      return { ok: false, error: message };
+    }
+    return { ok: true, path: relative };
+  }
+
+  private noteFeed(
+    agentId: string,
+    source: string,
+    query: string,
+    items: number,
+    cost: number,
+    outcome: string,
+    evidence = "",
+  ): void {
+    const extra = evidence ? ` evidence=${evidence}` : "";
+    const flat = query.replace(/\s+/g, " ").slice(0, 180);
+    this.event(
+      agentId,
+      "read_feed",
+      `outcome=${outcome} cost=${cost} source=${source} items=${items} query=${flat}${extra}`,
+    );
+  }
+
+  private noteFeedBlocked(agentId: string, source: string, status: number, reason: string): void {
+    if (source !== "reddit") return;
+    this.event(agentId, "feed_blocked", `source=reddit status=${status} reason=${reason.replace(/\s+/g, " ").slice(0, 180)}`);
+  }
+
   private noteCrawl(
     agentId: string,
     url: string,
@@ -1403,6 +1536,43 @@ class SimulatedSettler implements PaymentSettler {
 }
 
 const CRAWL_PREVIEW_CHARS = 2_000;
+const FEED_PREVIEW_CHARS = 500;
+
+function readFeedOptions(value: unknown): Record<string, unknown> {
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as Record<string, unknown>;
+  return {};
+}
+
+function presentFeed(result: FeedResult, evidence: string): string {
+  const saved = evidence ? `Saved feed to ${evidence}.` : "";
+  if (result.blocked) {
+    return [`blocked=true source=${result.source} status=${result.status ?? ""}`, result.reason ?? "", saved]
+      .filter((part) => part.trim())
+      .join("\n");
+  }
+  if (result.unavailable) {
+    return [`unavailable: requires auth`, `source=${result.source}`, saved].filter((part) => part.trim()).join("\n");
+  }
+  const parts = [`source=${result.source} items=${result.items.length}`, saved].filter((part) => part.trim());
+  for (const item of result.items) {
+    const text = item.text.length > FEED_PREVIEW_CHARS ? item.text.slice(0, FEED_PREVIEW_CHARS) : item.text;
+    const meta = [
+      item.author ? `author=${item.author}` : "",
+      item.score !== undefined ? `score=${item.score}` : "",
+      item.created_at ?? "",
+    ].filter(Boolean);
+    parts.push([item.title, item.url, text, meta.join(" ")].filter((part) => part && part.trim()).join("\n"));
+  }
+  return parts.join("\n\n").slice(0, 8000);
+}
 
 function presentCrawl(crawl: CrawlSiteResult, evidence: string): string {
   const parts = [

@@ -1,5 +1,9 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { isAddress } from "viem";
 import { parseUsd } from "./money.js";
+
+const DEFAULT_REDDIT_USER_AGENT = "AutomatonSenses/2.0 (key-free public JSON reader; no OAuth)";
 
 export type MoneyMode = "dry-run" | "live";
 export type NetworkName = "base-sepolia" | "base";
@@ -70,6 +74,10 @@ export interface AppConfig {
   crawlPagePriceUnits: number;
   crawlHourlyLimit: number;
   crawlMaxPages: number;
+  readFeedPriceUnits: number;
+  readFeedHourlyLimit: number;
+  redditUserAgent: string;
+  refDir: string;
   toolCosts: Record<string, number>;
 }
 
@@ -117,6 +125,15 @@ function wei(value: string | undefined, fallback: bigint, name: string): bigint 
   } catch {
     throw new Error(`${name} must be a non-negative integer number of wei.`);
   }
+}
+
+function headerValue(value: string | undefined, fallback: string): string {
+  const cleaned = (value ?? "").replace(/[\r\n]/g, "").trim();
+  return cleaned || fallback;
+}
+
+function defaultRefDir(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "ref");
 }
 
 function usd(value: string | undefined, fallback: string, name: string): number {
@@ -266,12 +283,17 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     crawlPagePriceUnits: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
     crawlHourlyLimit: integer(env.CRAWL_HOURLY_LIMIT, 5, "CRAWL_HOURLY_LIMIT"),
     crawlMaxPages: integer(env.CRAWL_MAX_PAGES, 20, "CRAWL_MAX_PAGES"),
+    readFeedPriceUnits: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
+    readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
+    redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
+    refDir: path.resolve(env.REF_DIR && env.REF_DIR.trim() ? env.REF_DIR : defaultRefDir()),
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
       web_search: usd(env.SEARCH_COST_USD, "0.002", "SEARCH_COST_USD"),
       see_page: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
       crawl_site: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
+      read_feed: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),

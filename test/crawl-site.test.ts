@@ -7,6 +7,8 @@ import {
   SensesRequestError,
   type CrawlSiteRequest,
   type CrawlSiteResult,
+  type FeedRequest,
+  type FeedResult,
   type SeePageRequest,
   type SeePageResult,
   type SensesClient,
@@ -517,6 +519,10 @@ class LedgerProbe implements SensesClient {
 
   async see(_input: SeePageRequest): Promise<SeePageResult> {
     throw new Error("see was not stubbed");
+  }
+
+  async feed(_input: FeedRequest): Promise<FeedResult> {
+    throw new Error("feed was not stubbed");
   }
 
   async crawl(input: CrawlSiteRequest): Promise<CrawlSiteResult> {

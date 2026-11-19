@@ -6,6 +6,8 @@ import {
   SensesRequestError,
   type CrawlSiteRequest,
   type CrawlSiteResult,
+  type FeedRequest,
+  type FeedResult,
   type SeePageRequest,
   type SeePageResult,
   type SensesClient,
@@ -30,6 +32,10 @@ class Probe implements SensesClient {
 
   async crawl(_input: CrawlSiteRequest): Promise<CrawlSiteResult> {
     throw new Error("crawl was not stubbed");
+  }
+
+  async feed(_input: FeedRequest): Promise<FeedResult> {
+    throw new Error("feed was not stubbed");
   }
 
   async see(input: SeePageRequest): Promise<SeePageResult> {

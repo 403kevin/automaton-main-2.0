@@ -1,0 +1,14 @@
+{
+  "response": {
+    "docs": [
+      {
+        "identifier": "item-1",
+        "title": "Public Domain Film",
+        "description": "  A film.  ",
+        "creator": "Prelinger",
+        "date": "1990-01-01",
+        "downloads": 8
+      }
+    ]
+  }
+}

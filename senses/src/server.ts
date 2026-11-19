@@ -1,5 +1,8 @@
 import http from "node:http";
 import { pathToFileURL } from "node:url";
+import { readFeed, knownFeedSource } from "../feeds/index.ts";
+import type { FeedContext } from "../feeds/fetch.ts";
+import { DEFAULT_REDDIT_USER_AGENT } from "../feeds/types.ts";
 import { crawlSite, defaultLoadDocument, MAX_CRAWL_PAGES, type LoadDocument } from "./crawl.ts";
 import { type BrowseRequest, type PageView, SeeError } from "./contract.ts";
 import { SerialQueue } from "./queue.ts";
@@ -23,6 +26,10 @@ export interface SensesServerOptions {
   crawlBudgetMs?: number;
   executablePath?: string;
   launchArgs?: string[];
+  feedFetch?: typeof fetch;
+  feedNow?: () => number;
+  feedSleep?: (ms: number) => Promise<void>;
+  redditUserAgent?: string;
 }
 
 interface JobResult {
@@ -62,6 +69,11 @@ export function createSensesServer(options: SensesServerOptions = {}): http.Serv
         send(res, result.status, result.body);
         return;
       }
+      if (req.method === "POST" && (req.url === "/feed" || req.url === "/feed/")) {
+        const result = await queue.run(() => handleFeed(req, resolveHost, options));
+        send(res, result.status, result.body);
+        return;
+      }
       send(res, 404, { error: "Not found." });
     } catch (error) {
       const message = error instanceof Error ? error.message : "see failed";
@@ -69,6 +81,55 @@ export function createSensesServer(options: SensesServerOptions = {}): http.Serv
       if (!res.headersSent) send(res, status, { error: message });
     }
   });
+}
+
+async function handleFeed(
+  req: http.IncomingMessage,
+  resolveHost: ResolveHost,
+  options: SensesServerOptions,
+): Promise<JobResult> {
+  const parsed = await readJson(req);
+  if (!parsed.ok) return parsed.result;
+  const record = parsed.record;
+  const source = typeof record.source === "string" ? record.source.trim().toLowerCase() : "";
+  if (!knownFeedSource(source)) return { status: 400, body: { error: "unknown source" } };
+  if (typeof record.query !== "string" || !record.query.trim()) {
+    return { status: 400, body: { error: "query is required." } };
+  }
+  if (record.query.length > 2_000) return { status: 400, body: { error: "query is too long." } };
+  if (record.options !== undefined && (!record.options || typeof record.options !== "object" || Array.isArray(record.options))) {
+    return { status: 400, body: { error: "options must be an object." } };
+  }
+  const denyHosts = Array.isArray(record.denyHosts)
+    ? record.denyHosts.filter((item): item is string => typeof item === "string")
+    : [];
+  const ctx: FeedContext = {
+    query: record.query.trim(),
+    options: (record.options as Record<string, unknown> | undefined) ?? {},
+    denyHosts,
+    resolveHost,
+    fetchImpl: options.feedFetch ?? fetch,
+    now: options.feedNow ?? Date.now,
+    sleep:
+      options.feedSleep ??
+      ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms))),
+    userAgent: feedUserAgent(record, options),
+  };
+  try {
+    const result = await readFeed(source, ctx);
+    return { status: 200, body: { source, ...result } };
+  } catch (error) {
+    if (error instanceof SeeError) return { status: error.status, body: { error: error.message } };
+    const message = error instanceof Error ? error.message : "feed failed";
+    return { status: 502, body: { error: message } };
+  }
+}
+
+function feedUserAgent(record: Record<string, unknown>, options: SensesServerOptions): string {
+  const fromBody = typeof record.userAgent === "string" ? record.userAgent.replace(/[\r\n]/g, "").trim() : "";
+  if (fromBody && fromBody.length <= 200) return fromBody;
+  const configured = (options.redditUserAgent ?? process.env.REDDIT_USER_AGENT ?? "").replace(/[\r\n]/g, "").trim();
+  return configured || DEFAULT_REDDIT_USER_AGENT;
 }
 
 async function handleCrawl(

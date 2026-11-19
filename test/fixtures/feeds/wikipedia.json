@@ -1,0 +1,13 @@
+{
+  "query": {
+    "search": [
+      {
+        "pageid": 6678,
+        "title": "Cat",
+        "snippet": "The <span class=\"searchmatch\">cat</span> is a pet.",
+        "timestamp": "2026-01-02T03:04:05Z",
+        "wordcount": 100
+      }
+    ]
+  }
+}

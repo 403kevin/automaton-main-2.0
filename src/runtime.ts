@@ -108,6 +108,7 @@ export class DockerRuntime implements AgentRuntime {
     } else {
       args.push("--mount", `type=bind,source=${spec.workspace},target=/workspace`);
     }
+    args.push("-v", `${this.config.refDir}:/ref:ro`);
     args.push(this.config.agentImage, "node", "/app/dist/agent/main.js");
     const { stdout } = await exec(this.docker[0], [...this.docker.slice(1), ...args], { timeout: 60_000 });
     return { containerId: stdout.trim() || name };

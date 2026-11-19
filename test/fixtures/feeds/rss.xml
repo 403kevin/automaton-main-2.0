@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title><![CDATA[Ears &amp; Feeds]]></title>
+      <link>https://example.com/ears</link>
+      <description>Hello from the feed.</description>
+      <author>ada@example.com</author>
+      <pubDate>Mon, 01 Jan 2024 00:00:00 GMT</pubDate>
+      <guid>https://example.com/ears</guid>
+    </item>
+    <item>
+      <title>Private</title>
+      <link>http://10.0.0.1/secret</link>
+      <description>should be dropped on the way out</description>
+      <guid>http://10.0.0.1/secret</guid>
+    </item>
+  </channel>
+</rss>

@@ -24,6 +24,8 @@ services:
       DOCKER_VOLUME: automaton-data
       ORCHESTRATOR_URL: http://orchestrator:4747
       SENSES_URL: http://senses:7070
+      # Host path of ./ref. The docker daemon bind-mounts it read-only at /ref in agent containers.
+      REF_DIR: ${REF_DIR:-}
       DAILY_RENT_USD: ${DAILY_RENT_USD:-0.50}
       RENT_INTERVAL_MS: ${RENT_INTERVAL_MS:-86400000}
       GRACE_MS: ${GRACE_MS:-3600000}
@@ -73,6 +75,7 @@ services:
     environment:
       PORT: "7070"
       HOME: /tmp
+      REDDIT_USER_AGENT: "${REDDIT_USER_AGENT:-AutomatonSenses/2.0 (key-free public JSON reader; no OAuth)}"
     networks:
       - senses
     restart: unless-stopped
