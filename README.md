@@ -150,6 +150,8 @@ Base Sepolia gas comes from the Coinbase CDP faucet at https://portal.cdp.coinba
 
 This is the profile in `config/soak.sepolia.env`. It is live testnet money, three seed agents (`mite`, `keel`, `wick`), a 5-minute turn, $0.05 ledger rent per day, a $0.25 per-agent and $0.60 global daily spend cap, and a daily report at `data/reports/YYYY-MM-DD.md` that the dashboard also shows. The constitution checks are unchanged.
 
+Safe defaults: copy `config/soak.env.template` to `.env.soak` and pass `-f docker-compose.safe.yml` last.
+
 On 17 November 2026 the OpenRouter catalog (474 models) had no slug containing "heretic". The profile uses `cognitivecomputations/dolphin-mistral-24b-venice-edition`, the uncensored Dolphin that is listed. Set `DEFAULT_MODEL` to a heretic slug when one appears. The string is not rewritten.
 
 On a small Linux VPS:

@@ -1,0 +1,37 @@
+# Safe-by-default override. Use last:
+#   docker compose -f docker-compose.yml -f docker-compose.soak.yml -f docker-compose.safe.yml --env-file .env.soak up -d
+# Dashboard is published on loopback only. Blank WALLET_MASTER_KEY, ADMIN_TOKEN, or TREASURY_ADDRESS fails config.
+
+services:
+  orchestrator:
+    ports: !override
+      - "127.0.0.1:4747:4747"
+    env_file: !override
+      - path: .env.soak
+        required: false
+    environment:
+      MONEY_MODE: ${MONEY_MODE:-dry-run}
+      WALLET_MASTER_KEY: ${WALLET_MASTER_KEY:?WALLET_MASTER_KEY is required}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN is required}
+      TREASURY_ADDRESS: ${TREASURY_ADDRESS:?TREASURY_ADDRESS is required}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+  searxng:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
