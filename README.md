@@ -9,18 +9,20 @@ Agents are not given a product or a revenue plan. The genesis prompt tells them 
 Requirements: Node 22, and Docker if you want one container per agent.
 
 ```bash
-cp .env.example .env
-# put a long WALLET_MASTER_KEY and ADMIN_TOKEN in .env
 npm install
 npm test
 npm run demo
 ```
 
-The demo starts the orchestrator on port 4747, creates three agents, tops two of them up, and jumps the dry-run clock through one rent period and then through the grace window. The unfunded agent is archived. The funded agents stay alive. The dashboard stays up:
+`npm run demo` is the Stage 1 check. It needs no API keys, no Docker, and no network. It opens a temporary SQLite ledger, creates one agent, tops the ledger up by $0.05, and calls `see_page`, `crawl_site`, `read_feed`, `publish_page`, `serve_endpoint`, `browse`, and `offer_service` through the same review, debit, and call path an agent uses. Senses answers are stubbed. `browse` stays off, so that call is refused and the debit is $0. The script prints one row per tool: the price charged, the balance before and after, and the event or ledger id. It exits non-zero if a priced tool does not keep a debit or if a call writes no row. The shell environment and `.env` are not loaded. Money stays dry-run on Base Sepolia. Mainnet stays locked.
+
+`npm run demo -- --live` sends the three senses calls to `SENSES_URL` (default `http://127.0.0.1:7070`). That flag is optional.
+
+The survival demo still starts the orchestrator on port 4747, creates three agents, tops two of them up, and jumps the dry-run clock through one rent period and then through the grace window. The unfunded agent is archived. The funded agents stay alive. Run `npm run build`, then `npm run demo:survival`. The dashboard stays up:
 
 [Automaton](http://127.0.0.1:4747/)
 
-`npm run demo:check` runs the same scenario and exits.
+`npm run demo:check` runs that survival scenario and exits. The server still wants a long `WALLET_MASTER_KEY` and `ADMIN_TOKEN` in `.env`.
 
 On a Linux VPS:
 
@@ -262,12 +264,13 @@ npm test
 npm run build
 ```
 
-The suite covers the ledger (including idempotent income, rejected claims, and a failed chain read), the rent scheduler and death, survival tiers, spend caps, replication, the constitution checks, and a dry-run x402 payment plus an EIP-3009 signature.
+The suite covers the ledger (including idempotent income, rejected claims, and a failed chain read), the rent scheduler and death, survival tiers, spend caps, replication, the constitution checks, a dry-run x402 payment plus an EIP-3009 signature, and the Stage 1 demo in mock mode.
 
 ## Layout
 
 ```text
 src/swarm.ts          ledger, rent, death, spawn, tools, kill switch
+src/senses-demo.ts    Stage 1 demo: one debit and one record per tool
 src/survival.ts       tiers and the rent scheduler
 src/constitution.ts   rules enforced before a tool runs
 src/chain.ts          dry-run book and live Base USDC
