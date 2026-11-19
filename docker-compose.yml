@@ -23,6 +23,7 @@ services:
       DOCKER_NETWORK: automaton_default
       DOCKER_VOLUME: automaton-data
       ORCHESTRATOR_URL: http://orchestrator:4747
+      SENSES_URL: http://senses:7070
       DAILY_RENT_USD: ${DAILY_RENT_USD:-0.50}
       RENT_INTERVAL_MS: ${RENT_INTERVAL_MS:-86400000}
       GRACE_MS: ${GRACE_MS:-3600000}
@@ -32,6 +33,12 @@ services:
       LOW_COMPUTE_MODEL: ${LOW_COMPUTE_MODEL:-meta-llama/llama-3.1-8b-instruct}
       CRITICAL_MODEL: ${CRITICAL_MODEL:-meta-llama/llama-3.1-8b-instruct}
       COUNCIL_MODELS: ${COUNCIL_MODELS:-meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct}
+    networks:
+      - default
+      - senses
+    depends_on:
+      senses:
+        condition: service_healthy
     volumes:
       - automaton-data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -49,6 +56,55 @@ services:
       retries: 5
       start_period: 20s
 
+  # Agents are started on automaton_default only. They are not on `senses`,
+  # and this service publishes no ports, so only the orchestrator can call it.
+  senses:
+    image: automaton-senses:2
+    build:
+      context: .
+      dockerfile: senses/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+      - /home/pwuser:rw,nosuid,size=256m
+    shm_size: "256mb"
+    init: true
+    user: pwuser
+    environment:
+      PORT: "7070"
+      HOME: /tmp
+    networks:
+      - senses
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:7070/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 volumes:
   automaton-data:
     name: automaton-data
+
+networks:
+  default:
+    name: automaton_default
+  senses:
+    name: automaton_senses

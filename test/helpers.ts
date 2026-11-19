@@ -6,10 +6,16 @@ import { ManualClock } from "../src/clock.js";
 import { loadConfig, type AppConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
 import { MockSearch, type SearchProvider } from "../src/search.js";
+import type { SensesClient } from "../src/senses-client.js";
 import { FakeRuntime } from "../src/runtime.js";
 import { Swarm } from "../src/swarm.js";
 
-export function harness(overrides: Record<string, string> = {}, chain?: ChainPort, search?: SearchProvider) {
+export function harness(
+  overrides: Record<string, string> = {},
+  chain?: ChainPort,
+  search?: SearchProvider,
+  senses?: SensesClient,
+) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "automaton-"));
   const config = loadConfig({
     DATA_DIR: dir,
@@ -43,7 +49,7 @@ export function harness(overrides: Record<string, string> = {}, chain?: ChainPor
   const book = chain ?? new DryRunChain(db);
   const runtime = new FakeRuntime();
   const provider = search ?? new MockSearch();
-  const swarm = new Swarm(db, config, clock, book, runtime, provider);
+  const swarm = new Swarm(db, config, clock, book, runtime, provider, undefined, senses);
   return {
     dir,
     config,

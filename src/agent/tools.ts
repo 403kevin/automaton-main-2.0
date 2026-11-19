@@ -8,6 +8,7 @@ export const TOOL_DEFINITIONS = [
   { name: "shell", description: "Run a shell command in your workspace. The container is the sandbox. Host secrets are not available.", parameters: { command: { type: "string" } }, required: ["command"] },
   { name: "fetch_url", description: "HTTP GET a public http(s) URL. Private networks and the owner's accounts are blocked.", parameters: { url: { type: "string" } }, required: ["url"] },
   { name: "web_search", description: "Search the web through the configured provider.", parameters: { query: { type: "string" } }, required: ["query"] },
+  { name: "see_page", description: "Read a public http(s) page through the shared browser: title, main text as markdown, and links. screenshot saves a PNG under evidence/. Private addresses are refused. Debited from your ledger.", parameters: { url: { type: "string" }, screenshot: { type: "boolean" } }, required: ["url"] },
   { name: "read_file", description: "Read a file inside the workspace.", parameters: { path: { type: "string" } }, required: ["path"] },
   { name: "write_file", description: "Write a file inside the workspace.", parameters: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] },
   { name: "offer_service", description: "Publish a paid HTTP response. Buyers pay USDC per request. The gateway tells them you are an AI.", parameters: { priceUsd: { type: "string" }, description: { type: "string" }, body: { type: "string" } }, required: ["priceUsd", "description", "body"] },

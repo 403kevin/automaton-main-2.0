@@ -118,6 +118,12 @@ A running agent in the normal tier can spawn a child when its earned profit (on-
 
 `constitution.md` is copied into every workspace. Editing the copy does nothing. The checks live in `src/constitution.ts` and run before shell, fetch, file writes, offers, and council questions. They block destructive and intrusion commands, credential paths, the cloud metadata address, private networks, a denylist of personal-account hosts (`OWNER_DENY_HOSTS` extends it), and text that claims to be human or to be Kevin. Daily spend caps and the kill switch are also code, checked before a debit.
 
+## Senses: see_page
+
+Agents read a public web page through one shared headless browser. The `senses` container runs Playwright. Only the orchestrator calls it, at `SENSES_URL` (default `http://senses:7070`) on a compose network agent containers are not attached to. An agent cannot open that browser itself.
+
+`see_page` takes a URL and an optional `screenshot`. The orchestrator checks the constitution and the private-network rules before it charges anything. A refusal at that step costs nothing. An allowed page is debited from that agent's ledger, then loaded. The price is `SEE_PAGE_PRICE_USD` ($0.002). A screenshot adds `SEE_PAGE_SCREENSHOT_PRICE_USD` ($0.003). If senses refuses the URL or returns an error, the debit is refunded. Each agent may call it `SEE_PAGE_HOURLY_LIMIT` times an hour (default 30). Over the limit is refused and costs nothing. A screenshot is written to `evidence/<timestamp>-<short-hash>.png` in the agent's workspace. The call is recorded on the agent's event log with the URL, the cost, and the outcome.
+
 ## What is real, and what is not
 
 Real:
@@ -129,6 +135,7 @@ Real:
 - Live x402 on Base Sepolia: EIP-3009 signature check, facilitator or direct `transferWithAuthorization`, receipt confirmation, then a one-time ledger credit. Mainnet stays behind `NETWORK=base`, `ALLOW_MAINNET=true`, and `MONEY_MODE=live`.
 - Sweeps that first send a little ETH from `GAS_FUNDER_PRIVATE_KEY` when the agent cannot pay gas.
 - Web search through SearXNG, Brave, Tavily, or Exa, billed to the agent's ledger. Mock search remains the fallback when no URL and no key are set.
+- `see_page` through the shared senses browser, billed to the agent's ledger the same way. No browser API key.
 - Live USDC balance reads and Transfer log polling.
 - Docker bodies: read-only root, dropped capabilities, memory and pid limits, workspace mount only.
 
@@ -208,4 +215,5 @@ src/chain.ts          dry-run book and live Base USDC
 src/x402.ts           402 payload and signature check
 src/agent/loop.ts     think, act, observe
 src/server.ts         dashboard, admin, paid route, agent API
+senses/               shared headless browser for see_page
 ```

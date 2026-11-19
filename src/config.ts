@@ -63,6 +63,10 @@ export interface AppConfig {
   denyHosts: string[];
   turnIntervalMs: number;
   constitutionPath: string;
+  sensesUrl: string;
+  seePagePriceUnits: number;
+  seePageScreenshotPriceUnits: number;
+  seePageHourlyLimit: number;
   toolCosts: Record<string, number>;
 }
 
@@ -252,10 +256,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       .filter(Boolean),
     turnIntervalMs: integer(env.TURN_INTERVAL_MS, 15_000, "TURN_INTERVAL_MS"),
     constitutionPath: env.CONSTITUTION_PATH ?? "constitution.md",
+    sensesUrl: env.SENSES_URL || "http://senses:7070",
+    seePagePriceUnits: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
+    seePageScreenshotPriceUnits: usd(env.SEE_PAGE_SCREENSHOT_PRICE_USD, "0.003", "SEE_PAGE_SCREENSHOT_PRICE_USD"),
+    seePageHourlyLimit: integer(env.SEE_PAGE_HOURLY_LIMIT, 30, "SEE_PAGE_HOURLY_LIMIT"),
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
       web_search: usd(env.SEARCH_COST_USD, "0.002", "SEARCH_COST_USD"),
+      see_page: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),

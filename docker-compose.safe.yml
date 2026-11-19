@@ -35,3 +35,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+  senses:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

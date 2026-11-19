@@ -6,7 +6,7 @@ import { isAddress } from "viem";
 import type { ChainPort } from "./chain.js";
 import type { Clock } from "./clock.js";
 import type { AppConfig } from "./config.js";
-import { CONSTITUTION_TEXT, reviewCommand, reviewText, reviewUrl } from "./constitution.js";
+import { CONSTITUTION_TEXT, constitutionDenyHosts, reviewCommand, reviewText, reviewUrl } from "./constitution.js";
 import { DatabaseSync } from "node:sqlite";
 import { getAgent, getAgentByAddress, getService, kvGet, kvSet, listAgents } from "./db.js";
 import { DEFAULT_GENESIS } from "./genesis.js";
@@ -14,6 +14,7 @@ import { newId, newToken } from "./ids.js";
 import { dayKey, formatUsd } from "./money.js";
 import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
+import { HttpSensesClient, type SensesClient } from "./senses-client.js";
 import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
@@ -65,6 +66,7 @@ export class Swarm {
   private councilRunner?: (agentId: string, question: string) => Promise<Result<string>>;
   private settler: PaymentSettler | null = null;
   private reportTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly sensesClient: SensesClient;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -74,7 +76,9 @@ export class Swarm {
     private runtime: AgentRuntime,
     private readonly search: SearchProvider,
     private readonly resolveHost: (host: string) => Promise<string[]> = defaultResolve,
+    senses?: SensesClient,
   ) {
+    this.sensesClient = senses ?? new HttpSensesClient(config.sensesUrl);
     const now = clock.now();
     const storedRent = kvGet(db, "last_rent_at");
     const parsed = storedRent ? Number(storedRent) : now;
@@ -295,7 +299,7 @@ export class Swarm {
     return { ok: true, value: { balance: agent.balanceUnits } };
   }
 
-  debit(agentId: string, units: number, category: SpendCategory, ref: string, note: string): Result<{ balance: number }> {
+  debit(agentId: string, units: number, category: SpendCategory, ref: string, note: string): Result<{ balance: number; duplicate?: boolean }> {
     if (units <= 0) return { ok: false, error: "Debit must be positive." };
     return this.post({
       agentId,
@@ -482,6 +486,7 @@ export class Swarm {
       if (!charged.ok) return { ok: false, reason: charged.error };
       return { ok: true, handled: false };
     }
+    if (call.name === "see_page") return this.seePage(agentId, call);
     if (call.name === "web_search") {
       const query = String(args.query ?? "").slice(0, 300);
       if (!query) return { ok: false, reason: "Query is empty." };
@@ -894,6 +899,100 @@ export class Swarm {
     const debited = this.debit(agentId, Number(price), "x402", `x402-out:${nonce}`, `external ${url}`);
     if (!debited.ok) return { ok: false, error: `The remote server accepted payment but the ledger debit failed: ${debited.error}` };
     return { ok: true, value: body };
+  }
+
+  private async seePage(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const url = String(call.arguments?.url ?? "").trim();
+    const screenshot = call.arguments?.screenshot === true || call.arguments?.screenshot === "true";
+    const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
+    if (!review.allowed) {
+      this.noteSee(agentId, url, 0, "refused");
+      return this.blocked(agentId, review.reason);
+    }
+    if (this.seePageUses(agentId) >= this.config.seePageHourlyLimit) {
+      const reason = `see_page hourly limit is ${this.config.seePageHourlyLimit}.`;
+      this.noteSee(agentId, url, 0, "limit");
+      return { ok: false, reason };
+    }
+    const cost = this.config.seePagePriceUnits + (screenshot ? this.config.seePageScreenshotPriceUnits : 0);
+    const debited = this.debit(agentId, cost, "tool", `tool:${call.id}`, "see_page");
+    if (!debited.ok) return { ok: false, reason: debited.error };
+    if (debited.value.duplicate) return { ok: false, reason: "see_page call was already billed." };
+    const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
+    try {
+      const page = await this.sensesClient.see({ url, screenshot, denyHosts });
+      let evidence = "";
+      if (screenshot) {
+        const saved = this.saveScreenshot(agent.workspace, page.png);
+        if (!saved.ok) {
+          this.refundSee(agentId, cost, call.id);
+          this.noteSee(agentId, url, 0, "error");
+          return { ok: false, reason: saved.error };
+        }
+        evidence = saved.path;
+      }
+      this.noteSee(agentId, url, cost, "ok", evidence);
+      const text = [page.title, page.markdown, page.links.join("\n"), evidence ? `Saved screenshot to ${evidence}.` : ""]
+        .filter((part) => part && part.trim())
+        .join("\n\n");
+      return { ok: true, handled: true, output: text.slice(0, 8000) };
+    } catch (error) {
+      this.refundSee(agentId, cost, call.id);
+      this.noteSee(agentId, url, 0, "error");
+      const reason = error instanceof Error ? error.message : "see_page failed.";
+      return { ok: false, reason: reason.slice(0, 300) };
+    }
+  }
+
+  private seePageUses(agentId: string): number {
+    const since = this.clock.now() - 3_600_000;
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM ledger_entries WHERE agent_id = ? AND note = 'see_page' AND amount_units < 0 AND created_at > ?",
+      )
+      .get(agentId, since) as { n: number };
+    return row.n;
+  }
+
+  private refundSee(agentId: string, units: number, callId: string): void {
+    const posted = this.post({
+      agentId,
+      kind: "tool",
+      amount: units,
+      ref: `refund:${callId}`,
+      note: "see_page refund",
+    });
+    if (!posted.ok || posted.value.duplicate) return;
+    this.db
+      .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'tool', ?, ?)")
+      .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
+  }
+
+  private saveScreenshot(
+    workspace: string,
+    png: string | undefined,
+  ): { ok: true; path: string } | { ok: false; error: string } {
+    if (!png) return { ok: false, error: "Senses did not return a screenshot." };
+    const bytes = Buffer.from(png, "base64");
+    if (bytes.length < 8 || bytes[0] !== 0x89 || bytes.toString("ascii", 1, 4) !== "PNG") {
+      return { ok: false, error: "Screenshot was not a PNG." };
+    }
+    const name = `${this.clock.now()}-${createHash("sha256").update(bytes).digest("hex").slice(0, 8)}.png`;
+    const relative = `evidence/${name}`;
+    const dest = path.join(workspace, "evidence", name);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, bytes);
+    return { ok: true, path: relative };
+  }
+
+  private noteSee(agentId: string, url: string, cost: number, outcome: string, evidence = ""): void {
+    const extra = evidence ? ` evidence=${evidence}` : "";
+    this.event(agentId, "see_page", `outcome=${outcome} cost=${cost} url=${url}${extra}`);
   }
 
   private chargeTool(agentId: string, name: string, callId: string): Result<{ balance: number }> {
