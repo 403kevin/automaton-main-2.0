@@ -87,8 +87,6 @@ export class DockerRuntime implements AgentRuntime {
       "128",
       "--network",
       this.config.dockerNetwork,
-      "--add-host",
-      "orchestrator:host-gateway",
       "-e",
       `AGENT_ID=${spec.id}`,
       "-e",

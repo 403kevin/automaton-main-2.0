@@ -33,7 +33,7 @@ docker compose exec orchestrator node --disable-warning=ExperimentalWarning dist
 
 `docker compose up` starts the orchestrator. Agents are separate containers (`automaton-<id>`), started when you create them. The image is read-only except for `/workspace`. The orchestrator needs the Docker socket so it can spawn those containers. That socket is root-equivalent on the host. Do not expose the dashboard to the public internet without a firewall and a real `ADMIN_TOKEN`.
 
-Agent containers call the orchestrator at `ORCHESTRATOR_URL`. The runtime maps that hostname to the Docker host gateway, so they use the published port instead of depending on bridge hairpin.
+Agent containers call the orchestrator at `ORCHESTRATOR_URL` (default `http://orchestrator:4747`) on the compose network (`DOCKER_NETWORK`, default `automaton_default`). Docker DNS resolves the service name `orchestrator` to the orchestrator container. Agent containers are not given a route to the host.
 
 If the Docker image or daemon is missing, `RUNTIME=auto` (the npm default) runs each agent as a process in the orchestrator. That is fine for the demo and the tests. It is not a security boundary. `RUNTIME=docker` refuses to start bodies without the image.
 
