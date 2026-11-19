@@ -124,6 +124,16 @@ Agents read a public web page through one shared headless browser. The `senses` 
 
 `see_page` takes a URL and an optional `screenshot`. The orchestrator checks the constitution and the private-network rules before it charges anything. A refusal at that step costs nothing. An allowed page is debited from that agent's ledger, then loaded. The price is `SEE_PAGE_PRICE_USD` ($0.002). A screenshot adds `SEE_PAGE_SCREENSHOT_PRICE_USD` ($0.003). If senses refuses the URL or returns an error, the debit is refunded. Each agent may call it `SEE_PAGE_HOURLY_LIMIT` times an hour (default 30). Over the limit is refused and costs nothing. A screenshot is written to `evidence/<timestamp>-<short-hash>.png` in the agent's workspace. The call is recorded on the agent's event log with the URL, the cost, and the outcome.
 
+## Senses: crawl_site
+
+`crawl_site` reads a small part of one public site through that same service. It takes a URL, `max_pages` (default 10, hard cap `CRAWL_MAX_PAGES`, which defaults to 20), and `same_domain` (default true). Same domain means that exact host. `www` and the bare domain are different hosts, and subdomains are not followed. `same_domain: false` may follow other hosts. Every URL, and every redirect hop, still goes through the private-network and deny-list checks.
+
+The crawler fetches `/robots.txt` first and obeys it. A group for its own user agent, `AutomatonSenses/2.0`, wins when one exists; otherwise it uses `User-agent: *`. `Allow` and `Disallow` use the longest match. A 4xx (the file is missing, or any other client error) is allow-all and the result says `robots: missing`. A 5xx, a timeout, or a robots.txt that cannot be fetched is disallow-all and the result says `robots: unreachable`. No page is fetched in that case. A file it could read says `robots: ok`.
+
+It seeds URLs from `Sitemap:` lines, or from `/sitemap.xml` when none are listed, then follows links breadth-first. It does not submit forms or download files. Non-HTML responses are skipped. Each document is a plain GET. Playwright runs only when the visible text, with the head, scripts, styles, and tags removed, is shorter than 80 characters. Requests to one host are at least one second apart. A `Crawl-delay` larger than that is honoured, up to 10 seconds. The crawl also stops at `max_pages`, at 2 MB on a single page, and at 120 seconds.
+
+The orchestrator checks the constitution before it charges anything. That refusal costs nothing. It then reserves `max_pages` × `CRAWL_PAGE_PRICE_USD` ($0.001 per page) and refuses, still at no cost, when the agent cannot cover the reserve. Afterward it keeps the charge only for pages actually fetched. Zero pages cost nothing. A senses error refunds the reserve. Each agent may start `CRAWL_HOURLY_LIMIT` crawls an hour (default 5). Over the limit is refused and costs nothing. The full JSON is saved at `evidence/<timestamp>-<short-hash>-crawl.json`. The tool result sent back is the titles, the URLs, and about the first 2000 characters of each page. One event row records the agent, the start URL, pages fetched, pages skipped, the cost, and the outcome.
+
 ## What is real, and what is not
 
 Real:
@@ -136,6 +146,7 @@ Real:
 - Sweeps that first send a little ETH from `GAS_FUNDER_PRIVATE_KEY` when the agent cannot pay gas.
 - Web search through SearXNG, Brave, Tavily, or Exa, billed to the agent's ledger. Mock search remains the fallback when no URL and no key are set.
 - `see_page` through the shared senses browser, billed to the agent's ledger the same way. No browser API key.
+- `crawl_site` through the same service, billed per page actually fetched. No crawl API key.
 - Live USDC balance reads and Transfer log polling.
 - Docker bodies: read-only root, dropped capabilities, memory and pid limits, workspace mount only.
 
@@ -215,5 +226,5 @@ src/chain.ts          dry-run book and live Base USDC
 src/x402.ts           402 payload and signature check
 src/agent/loop.ts     think, act, observe
 src/server.ts         dashboard, admin, paid route, agent API
-senses/               shared headless browser for see_page
+senses/               shared fetch and browser for see_page and crawl_site
 ```

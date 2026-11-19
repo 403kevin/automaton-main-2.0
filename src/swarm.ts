@@ -14,7 +14,7 @@ import { newId, newToken } from "./ids.js";
 import { dayKey, formatUsd } from "./money.js";
 import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
-import { HttpSensesClient, type SensesClient } from "./senses-client.js";
+import { HttpSensesClient, type CrawlSiteResult, type SensesClient } from "./senses-client.js";
 import { checkSpend } from "./spend.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
@@ -487,6 +487,7 @@ export class Swarm {
       return { ok: true, handled: false };
     }
     if (call.name === "see_page") return this.seePage(agentId, call);
+    if (call.name === "crawl_site") return this.crawlSite(agentId, call);
     if (call.name === "web_search") {
       const query = String(args.query ?? "").slice(0, 300);
       if (!query) return { ok: false, reason: "Query is empty." };
@@ -995,6 +996,133 @@ export class Swarm {
     this.event(agentId, "see_page", `outcome=${outcome} cost=${cost} url=${url}${extra}`);
   }
 
+  private async crawlSite(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const url = String(call.arguments?.url ?? "").trim();
+    const maxPages = this.readCrawlPages(call.arguments?.max_pages);
+    const sameDomain = call.arguments?.same_domain !== false && call.arguments?.same_domain !== "false";
+    const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
+    if (!review.allowed) {
+      this.noteCrawl(agentId, url, 0, 0, 0, "refused");
+      return this.blocked(agentId, review.reason);
+    }
+    if (this.crawlUses(agentId) >= this.config.crawlHourlyLimit) {
+      const reason = `crawl_site hourly limit is ${this.config.crawlHourlyLimit}.`;
+      this.noteCrawl(agentId, url, 0, 0, 0, "limit");
+      return { ok: false, reason };
+    }
+    const price = this.config.crawlPagePriceUnits;
+    const hold = maxPages * price;
+    const reserved = this.authorize(agentId, hold, "tool");
+    if (!reserved.ok) {
+      this.noteCrawl(agentId, url, 0, 0, 0, "unaffordable");
+      return { ok: false, reason: reserved.error };
+    }
+    const debited = this.debit(agentId, hold, "tool", `tool:${call.id}`, "crawl_site");
+    if (!debited.ok) {
+      this.noteCrawl(agentId, url, 0, 0, 0, "unaffordable");
+      return { ok: false, reason: debited.error };
+    }
+    if (debited.value.duplicate) return { ok: false, reason: "crawl_site call was already billed." };
+    const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
+    try {
+      const crawl = await this.sensesClient.crawl({ url, maxPages, sameDomain, denyHosts });
+      const fetched = Math.min(crawl.pages.length, maxPages);
+      const refundUnits = hold - fetched * price;
+      if (refundUnits > 0) this.refundCrawl(agentId, refundUnits, call.id);
+      const cost = fetched * price;
+      const saved = this.saveCrawl(agent.workspace, crawl);
+      if (!saved.ok) {
+        if (cost > 0) this.refundCrawl(agentId, cost, `${call.id}:save`);
+        this.noteCrawl(agentId, url, 0, crawl.skipped.length, 0, "error");
+        return { ok: false, reason: saved.error };
+      }
+      this.noteCrawl(agentId, url, fetched, crawl.skipped.length, cost, "ok", saved.path);
+      return { ok: true, handled: true, output: presentCrawl(crawl, saved.path) };
+    } catch (error) {
+      this.refundCrawl(agentId, hold, call.id);
+      this.noteCrawl(agentId, url, 0, 0, 0, "error");
+      const reason = error instanceof Error ? error.message : "crawl_site failed.";
+      return { ok: false, reason: reason.slice(0, 300) };
+    }
+  }
+
+  private readCrawlPages(value: unknown): number {
+    const configured = Number.isFinite(this.config.crawlMaxPages) ? Math.floor(this.config.crawlMaxPages) : 20;
+    const cap = Math.min(Math.max(configured, 1), 20);
+    const fallback = Math.min(10, cap);
+    if (value === undefined || value === null || value === "") return fallback;
+    const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : Number.NaN;
+    if (!Number.isFinite(parsed)) return fallback;
+    const whole = Math.floor(parsed);
+    if (whole < 1) return fallback;
+    return Math.min(whole, cap);
+  }
+
+  private crawlUses(agentId: string): number {
+    const since = this.clock.now() - 3_600_000;
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM ledger_entries WHERE agent_id = ? AND note = 'crawl_site' AND amount_units < 0 AND created_at > ?",
+      )
+      .get(agentId, since) as { n: number };
+    return row.n;
+  }
+
+  private refundCrawl(agentId: string, units: number, callId: string): void {
+    if (units <= 0) return;
+    const posted = this.post({
+      agentId,
+      kind: "tool",
+      amount: units,
+      ref: `refund:${callId}`,
+      note: "crawl_site refund",
+    });
+    if (!posted.ok || posted.value.duplicate) return;
+    this.db
+      .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'tool', ?, ?)")
+      .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
+  }
+
+  private saveCrawl(
+    workspace: string,
+    crawl: CrawlSiteResult,
+  ): { ok: true; path: string } | { ok: false; error: string } {
+    const payload = JSON.stringify(crawl, null, 2);
+    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-crawl.json`;
+    const relative = `evidence/${name}`;
+    const dest = path.join(workspace, "evidence", name);
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not save the crawl.";
+      return { ok: false, error: message };
+    }
+    return { ok: true, path: relative };
+  }
+
+  private noteCrawl(
+    agentId: string,
+    url: string,
+    fetched: number,
+    skipped: number,
+    cost: number,
+    outcome: string,
+    evidence = "",
+  ): void {
+    const extra = evidence ? ` evidence=${evidence}` : "";
+    this.event(
+      agentId,
+      "crawl_site",
+      `outcome=${outcome} cost=${cost} fetched=${fetched} skipped=${skipped} url=${url}${extra}`,
+    );
+  }
+
   private chargeTool(agentId: string, name: string, callId: string): Result<{ balance: number }> {
     const cost = this.config.toolCosts[name] ?? 0;
     if (cost === 0) return { ok: true, value: { balance: getAgent(this.db, agentId)?.balanceUnits ?? 0 } };
@@ -1272,6 +1400,23 @@ class SimulatedSettler implements PaymentSettler {
     if (!moved.ok || !moved.txHash) return { ok: false, error: moved.error ?? "Simulated settlement failed." };
     return { ok: true, txHash: moved.txHash };
   }
+}
+
+const CRAWL_PREVIEW_CHARS = 2_000;
+
+function presentCrawl(crawl: CrawlSiteResult, evidence: string): string {
+  const parts = [
+    `robots=${crawl.robots} fetched=${crawl.pages.length} skipped=${crawl.skipped.length}`,
+    `Saved crawl to ${evidence}.`,
+  ];
+  for (const page of crawl.pages) {
+    const body = page.markdown.length > CRAWL_PREVIEW_CHARS ? page.markdown.slice(0, CRAWL_PREVIEW_CHARS) : page.markdown;
+    parts.push([page.title, page.url, body].filter((part) => part && part.trim()).join("\n"));
+  }
+  if (crawl.skipped.length > 0) {
+    parts.push(`Skipped:\n${crawl.skipped.map((item) => `${item.url} ${item.reason}`).join("\n")}`);
+  }
+  return parts.join("\n\n");
 }
 
 function sha256(value: string): string {

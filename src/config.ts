@@ -67,6 +67,9 @@ export interface AppConfig {
   seePagePriceUnits: number;
   seePageScreenshotPriceUnits: number;
   seePageHourlyLimit: number;
+  crawlPagePriceUnits: number;
+  crawlHourlyLimit: number;
+  crawlMaxPages: number;
   toolCosts: Record<string, number>;
 }
 
@@ -260,11 +263,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     seePagePriceUnits: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
     seePageScreenshotPriceUnits: usd(env.SEE_PAGE_SCREENSHOT_PRICE_USD, "0.003", "SEE_PAGE_SCREENSHOT_PRICE_USD"),
     seePageHourlyLimit: integer(env.SEE_PAGE_HOURLY_LIMIT, 30, "SEE_PAGE_HOURLY_LIMIT"),
+    crawlPagePriceUnits: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
+    crawlHourlyLimit: integer(env.CRAWL_HOURLY_LIMIT, 5, "CRAWL_HOURLY_LIMIT"),
+    crawlMaxPages: integer(env.CRAWL_MAX_PAGES, 20, "CRAWL_MAX_PAGES"),
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
       web_search: usd(env.SEARCH_COST_USD, "0.002", "SEARCH_COST_USD"),
       see_page: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
+      crawl_site: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),

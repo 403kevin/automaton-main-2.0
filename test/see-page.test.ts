@@ -2,7 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseUsd } from "../src/money.js";
-import { SensesRequestError, type SeePageRequest, type SeePageResult, type SensesClient } from "../src/senses-client.js";
+import {
+  SensesRequestError,
+  type CrawlSiteRequest,
+  type CrawlSiteResult,
+  type SeePageRequest,
+  type SeePageResult,
+  type SensesClient,
+} from "../src/senses-client.js";
 import { harness } from "./helpers.js";
 
 const PNG =
@@ -20,6 +27,10 @@ class Probe implements SensesClient {
   mode: "ok" | "throw" | "refuse" = "ok";
 
   constructor(private readonly balance: () => number) {}
+
+  async crawl(_input: CrawlSiteRequest): Promise<CrawlSiteResult> {
+    throw new Error("crawl was not stubbed");
+  }
 
   async see(input: SeePageRequest): Promise<SeePageResult> {
     this.calls += 1;
