@@ -1,6 +1,7 @@
 import { buildCompletionBody, extractActions, toolCallsFromActions } from "./actions.js";
 import type { AppConfig } from "./config.js";
 import { fetchWithBackoff } from "./http.js";
+import { ModelContextCache, trimMessagesToFit } from "./model-context.js";
 import { parseUsd } from "./money.js";
 import type { ChatMessage } from "./types.js";
 
@@ -19,6 +20,8 @@ export interface LlmCompletion {
 
 export interface LlmClient {
   complete(input: { model: string; messages: ChatMessage[]; tools?: unknown[] }): Promise<LlmCompletion>;
+  /** True when a failed JSON parse can issue a second paid call. */
+  mayRetry?(input: { model: string; tools?: unknown[] }): Promise<boolean>;
 }
 
 const PRICES: Record<string, { promptPerM: number; completionPerM: number }> = {
@@ -42,6 +45,10 @@ export class MockLlm implements LlmClient {
       toolCalls: [],
       usage: { promptTokens: 120, completionTokens: 40, costUsd: "0.0001" },
     };
+  }
+
+  async mayRetry(): Promise<boolean> {
+    return false;
   }
 }
 
@@ -83,32 +90,49 @@ export class ModelCatalog {
 
 export class OpenRouterLlm implements LlmClient {
   private readonly catalog: ModelCatalog;
+  private readonly contexts: ModelContextCache;
   private readonly fetcher: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(
     private readonly config: AppConfig,
-    deps?: { fetch?: typeof fetch; catalog?: ModelCatalog; sleep?: (ms: number) => Promise<void> },
+    deps?: { fetch?: typeof fetch; catalog?: ModelCatalog; contexts?: ModelContextCache; sleep?: (ms: number) => Promise<void> },
   ) {
     this.fetcher = deps?.fetch ?? fetch;
     this.sleep = deps?.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.catalog = deps?.catalog ?? new ModelCatalog(this.fetcher, this.sleep);
+    this.contexts = deps?.contexts ?? new ModelContextCache(this.fetcher);
+  }
+
+  async mayRetry(input: { model: string; tools?: unknown[] }): Promise<boolean> {
+    const supported = await this.catalog.supportedParameters(input.model);
+    const planned = buildCompletionBody({ model: input.model, messages: [], tools: input.tools, supported });
+    return planned.protocol !== "tools";
   }
 
   async complete(input: { model: string; messages: ChatMessage[]; tools?: unknown[] }): Promise<LlmCompletion> {
     const supported = await this.catalog.supportedParameters(input.model);
     const planned = buildCompletionBody({ model: input.model, messages: input.messages, tools: input.tools, supported });
-    const first = await this.post(planned.body);
+    const maxTokens = completionLimit(planned.body);
+    const contextLength = await this.contexts.contextLength(input.model);
+    const fitted = trimMessagesToFit(asMessages(planned.body.messages), contextLength, maxTokens);
+    const first = await this.post({ ...planned.body, messages: fitted });
     if (planned.protocol === "tools") return first;
     const parsed = extractActions(first.content);
     if (parsed.ok) {
       return { ...first, content: parsed.say || first.content, toolCalls: jsonToolCalls(parsed.actions) };
     }
-    const retryMessages = [
-      ...((planned.body.messages as ChatMessage[]) ?? input.messages),
-      { role: "user" as const, content: "That was not valid JSON. Reply with one JSON object only, using say and actions." },
-    ];
-    const second = await this.post({ ...planned.body, messages: retryMessages });
+    const retryMessages = trimMessagesToFit(
+      [...fitted, { role: "user", content: "That was not valid JSON. Reply with one JSON object only, using say and actions." }],
+      contextLength,
+      maxTokens,
+    );
+    let second: LlmCompletion;
+    try {
+      second = await this.post({ ...planned.body, messages: retryMessages });
+    } catch {
+      return { ...first, toolCalls: [] };
+    }
     const again = extractActions(second.content);
     return {
       ...second,
@@ -157,6 +181,15 @@ export class OpenRouterLlm implements LlmClient {
       },
     };
   }
+}
+
+function asMessages(value: unknown): ChatMessage[] {
+  return Array.isArray(value) ? (value as ChatMessage[]) : [];
+}
+
+function completionLimit(body: Record<string, unknown>): number {
+  const value = body.max_tokens;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 700;
 }
 
 function jsonToolCalls(actions: { name: string; arguments: Record<string, unknown> }[]): LlmCompletion["toolCalls"] {

@@ -5,8 +5,10 @@
 #
 # 1. 169.254.169.254 is unreachable from a throwaway container on DOCKER_NETWORK
 #    (default automaton_default), with a 3s timeout.
-# 2. From that container, ports 22, 80, and 443 on the network gateway are not
-#    reachable. 4747 is the orchestrator port and may be reachable.
+# 2. From that container, ports 22, 80, 443, and 4747 on the network gateway
+#    are not reachable. Agents reach the orchestrator via Docker DNS on the
+#    compose network, not the host. The dashboard is bound to 127.0.0.1, so
+#    port 4747 on the gateway must be closed too.
 # 3. Nothing is listening on 4747 on a public interface (ss -ltn).
 #    127.0.0.1 and ::1 are loopback and are allowed.
 # 4. WALLET_MASTER_KEY, ADMIN_TOKEN, and TREASURY_ADDRESS are non-empty in .env.soak.
@@ -501,11 +503,12 @@ check_network() {
 
   local -a open_ports=()
   local port result
-  for port in 22 80 443; do
+  for port in 22 80 443 4747; do
     case "$port" in
       22) result="$PORT_22" ;;
       80) result="$PORT_80" ;;
       443) result="$PORT_443" ;;
+      4747) result="$PORT_4747" ;;
       *) result="" ;;
     esac
     if [[ "$result" == "open" ]]; then
@@ -515,19 +518,11 @@ check_network() {
       return
     fi
   done
-  if [[ "$PORT_4747" != "open" && "$PORT_4747" != "timeout" && "$PORT_4747" != "unreachable" && "$PORT_4747" != "refused" ]]; then
-    record FAIL 2-host-ports "probe did not report port 4747"
-    return
-  fi
   if ((${#open_ports[@]} > 0)); then
     record FAIL 2-host-ports "gateway ${GATEWAY} accepted a connection on port ${open_ports[*]}"
     return
   fi
-  if [[ "$PORT_4747" == "open" ]]; then
-    record PASS 2-host-ports "ports 22, 80, and 443 are not reachable on gateway ${GATEWAY}; 4747 is open and allowed"
-  else
-    record PASS 2-host-ports "ports 22, 80, and 443 are not reachable on gateway ${GATEWAY}"
-  fi
+  record PASS 2-host-ports "ports 22, 80, 443, and 4747 are not reachable on gateway ${GATEWAY}"
 }
 
 check_bind() {
