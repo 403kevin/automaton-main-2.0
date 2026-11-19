@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Address, Hex } from "viem";
 import { isAddress } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import type { ChainPort } from "./chain.js";
 import type { Clock } from "./clock.js";
 import type { AppConfig } from "./config.js";
@@ -29,6 +30,7 @@ import { isPublicSlug, MAX_PAGE_BYTES, MAX_PAGES_PER_AGENT } from "./pages.js";
 import { DEFAULT_GENESIS } from "./genesis.js";
 import { newId, newToken } from "./ids.js";
 import { dayKey, formatUsd } from "./money.js";
+import { classifyPayer, type PayerClass } from "./payer.js";
 import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
 import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
@@ -89,6 +91,8 @@ interface PostInput {
   category?: SpendCategory;
   /** When set, the caller already holds a transaction and will commit or roll it back. */
   inTransaction?: boolean;
+  /** Set on inbound payments only. Null means the row is not an inbound payment. */
+  payerClass?: PayerClass | null;
 }
 
 export class Swarm {
@@ -293,17 +297,21 @@ export class Swarm {
     const agent = getAgent(this.db, agentId);
     if (!agent) return { ok: false, error: "Unknown agent." };
     if (from.toLowerCase() === agent.walletAddress.toLowerCase()) {
-      this.event(agentId, "rejected_claim", "Ignored a transfer from the agent's own wallet.");
+      this.event(agentId, "rejected_claim", "Ignored a transfer from the agent's own wallet.", this.payerClass(from));
       return { ok: false, error: "Self-transfers are not income." };
     }
+    const payerClass = this.payerClass(from);
     const posted = this.post({
       agentId,
       kind: "onchain_income",
       amount: units,
       ref: `onchain:${txHash}`,
       note: `from ${from}`,
+      payerClass,
     });
-    if (posted.ok && !posted.value.duplicate) this.event(agentId, "income", `Verified income ${formatUsd(units)} from ${from}`);
+    if (posted.ok && !posted.value.duplicate) {
+      this.event(agentId, "income", `Verified income ${formatUsd(units)} from ${from} (${payerClass})`, payerClass);
+    }
     return posted;
   }
 
@@ -371,7 +379,11 @@ export class Swarm {
     const endowment = this.config.childEndowmentUnits;
     const profit = this.profit(parentId);
     if (profit < endowment) {
-      return { ok: false, error: "Spawn requires earned profit at least as large as the child endowment. Owner top-ups do not count." };
+      return {
+        ok: false,
+        error:
+          "Spawn requires outside income minus this agent's costs at least as large as the child endowment. Owner top-ups and payments from swarm wallets do not count.",
+      };
     }
     if (parent.balanceUnits < endowment + this.config.replicationReserveUnits) {
       return { ok: false, error: "Balance must cover the endowment and the replication reserve." };
@@ -694,6 +706,7 @@ export class Swarm {
     const payer = getAgentByAddress(this.db, payment.from);
     const moved = await this.chain.transferBetween(payment.from, seller.walletAddress, payment.units);
     if (!moved.ok) return { ok: false, error: moved.error ?? "Transfer failed." };
+    const payerClass = this.payerClass(payment.from);
     // The ledger credit and the nonce mark commit together. No await inside this block,
     // so a second request cannot start its own transaction in the gap.
     this.db.exec("BEGIN IMMEDIATE");
@@ -710,6 +723,7 @@ export class Swarm {
         ref: `x402-in:${payment.nonce}`,
         note: `from ${payment.from}`,
         inTransaction: true,
+        payerClass,
       });
       if (!credited.ok) throw new Error(credited.error);
       if (credited.value.duplicate) throw new Error("Payment nonce was already used.");
@@ -726,7 +740,7 @@ export class Swarm {
       const message = error instanceof Error ? error.message : "Payment commit failed.";
       return { ok: false, error: message };
     }
-    this.event(seller.id, "x402_in", `Paid ${formatUsd(payment.priceUnits)} by ${payment.from}`);
+    this.event(seller.id, "x402_in", `Paid ${formatUsd(payment.priceUnits)} by ${payment.from} (${payerClass})`, payerClass);
     return { ok: true, value: { txHash: moved.txHash } };
   }
 
@@ -736,6 +750,7 @@ export class Swarm {
     const settled = await settler.settle(payment.message, payment.signature);
     if (!settled.ok) return { ok: false, error: settled.error };
     let drift = "";
+    const payerClass = this.payerClass(payment.from);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const credited = this.post({
@@ -745,6 +760,7 @@ export class Swarm {
         ref: `onchain:${settled.txHash}`,
         note: `x402 from ${payment.from}`,
         inTransaction: true,
+        payerClass,
       });
       if (!credited.ok) throw new Error(credited.error);
       const payer = getAgentByAddress(this.db, payment.from);
@@ -768,7 +784,12 @@ export class Swarm {
     }
     const payer = getAgentByAddress(this.db, payment.from);
     if (drift && payer) this.event(payer.id, "ledger_drift", drift);
-    this.event(seller.id, "x402_in", `Settled ${formatUsd(payment.priceUnits)} in ${settled.txHash}.`);
+    this.event(
+      seller.id,
+      "x402_in",
+      `Settled ${formatUsd(payment.priceUnits)} in ${settled.txHash} (${payerClass}).`,
+      payerClass,
+    );
     return { ok: true, value: { txHash: settled.txHash } };
   }
 
@@ -957,6 +978,9 @@ export class Swarm {
       const children = listAgents(this.db)
         .filter((child) => child.parentId === agent.id)
         .map((child) => ({ id: child.id, name: child.name, status: child.status }));
+      const outsideUnits = this.outsideIncome(agent.id);
+      const siblingUnits = this.siblingIncome(agent.id);
+      const netUnits = this.profit(agent.id);
       return {
         id: agent.id,
         name: agent.name,
@@ -965,8 +989,14 @@ export class Swarm {
         model: modelFor(agent, tier, this.config),
         balanceUnits: agent.balanceUnits,
         balance: formatUsd(agent.balanceUnits),
-        incomeUnits: this.sumKinds(agent.id, ["onchain_income", "x402_in"]),
-        income: formatUsd(this.sumKinds(agent.id, ["onchain_income", "x402_in"])),
+        incomeUnits: netUnits,
+        income: formatUsd(netUnits),
+        outsideIncomeUnits: outsideUnits,
+        outsideIncome: formatUsd(outsideUnits),
+        siblingIncomeUnits: siblingUnits,
+        siblingIncome: formatUsd(siblingUnits),
+        netOfCostUnits: netUnits,
+        netOfCost: formatUsd(netUnits),
         subsidyUnits: this.sumKinds(agent.id, ["owner_topup", "replication_in"]),
         subsidy: formatUsd(this.sumKinds(agent.id, ["owner_topup", "replication_in"])),
         spendUnits: this.spendTotal(agent.id),
@@ -1117,6 +1147,7 @@ export class Swarm {
       `Alive: ${alive.length}`,
       `Dead: ${dead.length}`,
       `HTTP 429: facilitator ${limits.facilitator}, openrouter ${limits.openrouter}, search ${limits.search}`,
+      "Untagged inbound ledger rows have no payer class. They count as outside income.",
       "",
       "## Agents",
     ];
@@ -1126,7 +1157,9 @@ export class Swarm {
         `- status: ${agent.status}`,
         `- tier: ${tierFor(agent.balanceUnits, this.config)}`,
         `- balance: ${formatUsd(agent.balanceUnits)}`,
-        `- income: ${formatUsd(this.sumKinds(agent.id, ["onchain_income", "x402_in"]))}`,
+        `- outside income: ${formatUsd(this.outsideIncome(agent.id))}`,
+        `- sibling income: ${formatUsd(this.siblingIncome(agent.id))}`,
+        `- net of cost: ${formatUsd(this.profit(agent.id))}`,
         `- spend: ${formatUsd(this.spendTotal(agent.id))}`,
         `- last: ${agent.lastAction ?? "(none)"}`,
         "",
@@ -1905,9 +1938,19 @@ export class Swarm {
       }
       this.db
         .prepare(
-          "INSERT INTO ledger_entries (id, agent_id, kind, amount_units, balance_after, ref, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO ledger_entries (id, agent_id, kind, amount_units, balance_after, ref, note, created_at, payer_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .run(newId("led"), input.agentId, input.kind, input.amount, next, input.ref, input.note.slice(0, 500), now);
+        .run(
+          newId("led"),
+          input.agentId,
+          input.kind,
+          input.amount,
+          next,
+          input.ref,
+          input.note.slice(0, 500),
+          now,
+          input.payerClass ?? null,
+        );
       const recover = agent.status === "grace" && next > 0;
       this.db
         .prepare(
@@ -1936,8 +1979,39 @@ export class Swarm {
     }
   }
 
+  /** Outside income minus this agent's own costs. Sibling income is excluded. Untagged rows count as outside. */
   private profit(agentId: string): number {
-    return this.sumKinds(agentId, ["onchain_income", "x402_in", "inference", "tool", "council", "rent", "x402_out", "replication_out"]);
+    const costs = this.sumKinds(agentId, ["inference", "tool", "council", "rent", "x402_out", "replication_out"]);
+    return this.outsideIncome(agentId) + costs;
+  }
+
+  private outsideIncome(agentId: string): number {
+    return this.sumInbound(agentId, "outside");
+  }
+
+  private siblingIncome(agentId: string): number {
+    return this.sumInbound(agentId, "sibling");
+  }
+
+  private sumInbound(agentId: string, which: PayerClass): number {
+    const clause = which === "sibling" ? "payer_class = 'sibling'" : "(payer_class IS NULL OR payer_class != 'sibling')";
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(amount_units), 0) AS n FROM ledger_entries WHERE agent_id = ? AND kind IN ('onchain_income', 'x402_in') AND amount_units > 0 AND ${clause}`,
+      )
+      .get(agentId) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Treasury, the gas funder when one is configured, and every agent wallet.
+   * Archived agents and this agent's own address stay in the set.
+   */
+  private payerClass(payer: string): PayerClass {
+    const rows = this.db.prepare("SELECT wallet_address FROM agents").all() as unknown as { wallet_address: string }[];
+    const addresses = [this.config.treasury, ...rows.map((row) => row.wallet_address)];
+    if (this.config.gasFunderKey) addresses.push(privateKeyToAccount(this.config.gasFunderKey).address);
+    return classifyPayer(payer, addresses);
   }
 
   private sumKinds(agentId: string, kinds: LedgerKind[]): number {
@@ -1975,13 +2049,10 @@ export class Swarm {
     return listAgents(this.db).filter((agent) => agent.status === "running" || agent.status === "grace");
   }
 
-  private event(agentId: string | null, kind: string, message: string): void {
-    this.db.prepare("INSERT INTO events (agent_id, kind, message, created_at) VALUES (?, ?, ?, ?)").run(
-      agentId,
-      kind,
-      message.slice(0, 500),
-      this.clock.now(),
-    );
+  private event(agentId: string | null, kind: string, message: string, payerClass: PayerClass | null = null): void {
+    this.db
+      .prepare("INSERT INTO events (agent_id, kind, message, created_at, payer_class) VALUES (?, ?, ?, ?, ?)")
+      .run(agentId, kind, message.slice(0, 500), this.clock.now(), payerClass);
   }
 
   private writeWorkspace(workspace: string, genesis: string, notes: string): void {

@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
   ref TEXT NOT NULL,
   note TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  payer_class TEXT,
   UNIQUE(agent_id, ref)
 );
 
@@ -46,7 +47,8 @@ CREATE TABLE IF NOT EXISTS events (
   agent_id TEXT,
   kind TEXT NOT NULL,
   message TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  payer_class TEXT
 );
 
 CREATE TABLE IF NOT EXISTS turns (
@@ -114,6 +116,7 @@ export function openDatabase(file: string): DatabaseSync {
   const db = new DatabaseSync(file);
   db.exec(SCHEMA);
   ensureNonceStatus(db);
+  ensurePayerClass(db);
   return db;
 }
 
@@ -127,6 +130,21 @@ function ensureNonceStatus(db: DatabaseSync): void {
   if (!cols.some((col) => col.name === "status")) {
     db.exec("ALTER TABLE nonces ADD COLUMN status TEXT NOT NULL DEFAULT 'used'");
   }
+}
+
+/**
+ * Add payer_class to ledgers created before inbound payments were tagged.
+ * The column is nullable. Existing rows stay NULL, and accounting treats that as outside.
+ * A new row is 'outside' or 'sibling'. This does not rewrite balances.
+ */
+function ensurePayerClass(db: DatabaseSync): void {
+  ensureColumn(db, "ledger_entries", "payer_class", "ALTER TABLE ledger_entries ADD COLUMN payer_class TEXT");
+  ensureColumn(db, "events", "payer_class", "ALTER TABLE events ADD COLUMN payer_class TEXT");
+}
+
+function ensureColumn(db: DatabaseSync, table: string, column: string, ddl: string): void {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as { name: string }[];
+  if (!cols.some((col) => col.name === column)) db.exec(ddl);
 }
 
 /**

@@ -61,7 +61,7 @@ export function dashboardHtml(): string {
   <div>
     <p class="eyebrow">Self-hosted swarm</p>
     <h1>Automaton</h1>
-    <p class="lede">Each agent pays rent from its ledger or it is deleted. Nobody assigned them a business. Verified on-chain transfers and owner top-ups are the only income. Claims are ignored.</p>
+    <p class="lede">Each agent pays rent from its ledger or it is deleted. Nobody assigned them a business. Profit is outside income minus that agent's own costs. A payment from any swarm wallet, including an archived agent, this agent, the treasury, or the gas funder, is sibling income and is not profit. Owner top-ups are not profit. Claims are ignored. Ledger rows with no payer class are old rows and count as outside income.</p>
   </div>
   <div class="badges" id="badges"></div>
 </header>
@@ -142,7 +142,7 @@ function render(data) {
     head.append(el("div", agent.status + " · " + agent.tier, agent.status));
     card.append(head);
     const nums = el("div", "", "nums");
-    for (const [label, value] of [["Balance", agent.balance], ["Verified income", agent.income], ["Subsidy", agent.subsidy], ["Spend", agent.spend], ["Rent charged", agent.rentCharged], ["Rent due", agent.rentDue], ["Depth", String(agent.depth)], ["Children", String(agent.children.length)]]) {
+    for (const [label, value] of [["Balance", agent.balance], ["Outside income", agent.outsideIncome], ["Sibling income", agent.siblingIncome], ["Net of cost", agent.netOfCost], ["Subsidy", agent.subsidy], ["Spend", agent.spend], ["Rent charged", agent.rentCharged], ["Rent due", agent.rentDue], ["Depth", String(agent.depth)], ["Children", String(agent.children.length)]]) {
       const cell = document.createElement("div");
       cell.append(el("span", label), el("b", value));
       nums.append(cell);

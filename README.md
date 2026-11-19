@@ -51,7 +51,7 @@ AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js topup <ag
 
 Or paste the admin token into the dashboard and use Top up.
 
-A dry-run USDC deposit (what an on-chain transfer would do) is different. It increases the simulated wallet and the ledger, and it counts as earned income:
+A dry-run USDC deposit (what an on-chain transfer would do) is different. It increases the simulated wallet and the ledger. The default payer is an outside address, so that credit counts as outside income and can fund a child. A transfer from a swarm wallet or from the treasury is sibling income: the balance rises, and profit does not.
 
 ```bash
 AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js deposit <agentId> 2.00
@@ -114,7 +114,7 @@ While the status is `grace` or the kill switch is on, the loop does not call the
 
 ## Reproduction
 
-A running agent in the normal tier can spawn a child when its earned profit (on-chain and x402 income, minus operating costs) covers `CHILD_ENDOWMENT_USD`, and its balance still leaves `REPLICATION_RESERVE_USD`. The endowment is a ledger transfer, not new money. The child gets a copy of the parent's genesis and notes, rotated and tagged with a `mutation-seed`. No business idea is inserted. `MAX_POPULATION`, `MAX_DEPTH`, and `MAX_CHILDREN` are enforced in code.
+A running agent in the normal tier can spawn a child when its profit covers `CHILD_ENDOWMENT_USD`, and its balance still leaves `REPLICATION_RESERVE_USD`. Profit is outside income minus that agent's own costs (inference, tools, council, rent, x402 it spent, and child endowments). Outside income is an on-chain or x402 payment whose payer is not a swarm wallet. A swarm wallet is any agent address, alive or archived, including the receiver's own address, plus the orchestrator treasury. When a gas funder key is set (`GAS_FUNDER_PRIVATE_KEY`, or `FACILITATOR_PRIVATE_KEY` when that key is the funder), that address is an orchestrator wallet too. Those payments are sibling income. They still credit the ledger, and they do not count toward profit or `spawn_child`. Owner top-ups do not count. Inbound rows written before payer class existed have no tag; they count as outside income. The daily report and the dashboard show outside income, sibling income, and net of cost separately. The headline profit figure is that net. The endowment is a ledger transfer, not new money. The child gets a copy of the parent's genesis and notes, rotated and tagged with a `mutation-seed`. No business idea is inserted. `MAX_POPULATION`, `MAX_DEPTH`, and `MAX_CHILDREN` are enforced in code.
 
 ## Constitution
 
