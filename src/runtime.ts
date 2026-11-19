@@ -148,6 +148,10 @@ export async function createRuntime(config: AppConfig, boot: BootFn): Promise<Ag
   return new ProcessRuntime(boot);
 }
 
+export async function detectDockerBinary(): Promise<string[] | null> {
+  return dockerCommand();
+}
+
 async function dockerCommand(): Promise<string[] | null> {
   if (await canRun(["docker", "info"])) return ["docker"];
   if (await canRun(["sudo", "-n", "docker", "info"])) return ["sudo", "-n", "docker"];

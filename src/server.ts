@@ -2,22 +2,31 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AppConfig } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
+import { HandlerSandbox, handlerHttpStatus, handlerSnapshotRoot } from "./handlers.js";
 import type { DirectHost } from "./host.js";
 import { parseUsd } from "./money.js";
+import { classifyAgentRoute, renderPageIndex, renderPublishedPage } from "./pages.js";
 import { caipNetwork, encodeHeaderValue, paymentRequirements, X402_HEADERS } from "./x402.js";
 import type { Swarm } from "./swarm.js";
 import { redact } from "./redact.js";
-import type { ChatMessage, ToolCall } from "./types.js";
+import type { ChatMessage, ServedEndpoint, ToolCall } from "./types.js";
 
 export interface ServerHandle {
   url: string;
   close(): Promise<void>;
 }
 
-export function startServer(input: { config: AppConfig; swarm: Swarm; host: DirectHost }): Promise<ServerHandle> {
+export function startServer(input: {
+  config: AppConfig;
+  swarm: Swarm;
+  host: DirectHost;
+  handlers?: HandlerSandbox;
+  background?: boolean;
+}): Promise<ServerHandle> {
   const { config, swarm, host } = input;
+  const handlers = input.handlers ?? defaultHandlers(config);
   const server = createServer((req, res) => {
-    void handle(req, res, config, swarm, host).catch((error) => {
+    void handle(req, res, config, swarm, host, handlers).catch((error) => {
       const message = redact(error instanceof Error ? error.message : "Request failed.");
       send(res, 500, { error: message });
     });
@@ -25,9 +34,11 @@ export function startServer(input: { config: AppConfig; swarm: Swarm; host: Dire
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.port, config.host, () => {
-      swarm.startScheduler();
-      swarm.startReports();
-      void swarm.resumeLiving();
+      if (input.background !== false) {
+        swarm.startScheduler();
+        swarm.startReports();
+        void swarm.resumeLiving();
+      }
       const address = server.address();
       const port = typeof address === "object" && address ? address.port : config.port;
       const hostName = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
@@ -35,9 +46,11 @@ export function startServer(input: { config: AppConfig; swarm: Swarm; host: Dire
         url: `http://${hostName}:${port}`,
         close: () =>
           new Promise((done, fail) => {
-            void swarm.haltBodies().finally(() => {
-              server.closeAllConnections();
-              server.close((error) => (error ? fail(error) : done()));
+            void handlers.shutdown().finally(() => {
+              void swarm.haltBodies().finally(() => {
+                server.closeAllConnections();
+                server.close((error) => (error ? fail(error) : done()));
+              });
             });
           }),
       });
@@ -45,9 +58,27 @@ export function startServer(input: { config: AppConfig; swarm: Swarm; host: Dire
   });
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, config: AppConfig, swarm: Swarm, host: DirectHost): Promise<void> {
-  const url = new URL(req.url ?? "/", "http://localhost");
-  const path = url.pathname;
+function defaultHandlers(config: AppConfig): HandlerSandbox {
+  return new HandlerSandbox({
+    docker: ["docker"],
+    image: config.handlerImage,
+    snapshotRoot: handlerSnapshotRoot(config.dataDir),
+    dockerVolume: config.dockerVolume,
+    timeoutMs: config.handlerTimeoutMs,
+    queueTimeoutMs: config.handlerQueueTimeoutMs,
+  });
+}
+
+async function handle(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  swarm: Swarm,
+  host: DirectHost,
+  handlers: HandlerSandbox,
+): Promise<void> {
+  const rawPath = (req.url ?? "/").split("?")[0] || "/";
+  const path = rawPath;
   if (req.method === "GET" && path === "/health") return send(res, 200, { ok: true });
   if (req.method === "GET" && path === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff" });
@@ -56,8 +87,19 @@ async function handle(req: IncomingMessage, res: ServerResponse, config: AppConf
   }
   if (req.method === "GET" && path === "/api/overview") return send(res, 200, swarm.overview());
 
-  const paid = /^\/a\/(a[a-f0-9]+)\/?$/.exec(path);
-  if (paid && (req.method === "GET" || req.method === "POST")) return servePaid(req, res, config, swarm, paid[1]);
+  const agentRoute = classifyAgentRoute(path);
+  if (agentRoute.kind === "refuse") return send(res, 400, { error: "Path is refused." });
+  if (agentRoute.kind === "legacy") {
+    if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
+    return servePaid(req, res, config, swarm, agentRoute.agentId);
+  }
+  if (agentRoute.kind === "index") {
+    if (req.method !== "GET") return send(res, 405, { error: "Method not allowed." });
+    return servePageIndex(res, swarm, agentRoute.agentId);
+  }
+  if (agentRoute.kind === "name") {
+    return serveNamed(req, res, config, swarm, handlers, agentRoute.agentId, agentRoute.name);
+  }
 
   if (path.startsWith("/admin/")) {
     if (!adminOk(req, config.adminToken)) return send(res, 401, { error: "Admin token rejected." });
@@ -144,13 +186,7 @@ async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppC
     description: service.description,
   });
   if (!payment) {
-    res.writeHead(402, {
-      "Content-Type": "application/json; charset=utf-8",
-      [X402_HEADERS.required]: encodeHeaderValue(challenge),
-      "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
-      "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
-    });
-    res.end(JSON.stringify(challenge));
+    writePaymentRequired(res, challenge);
     return;
   }
   const settled = await swarm.settleDryPayment(agentId, payment);
@@ -163,6 +199,153 @@ async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppC
     "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
   });
   res.end(settled.value.body);
+}
+
+function servePageIndex(res: ServerResponse, swarm: Swarm, agentId: string): void {
+  try {
+    swarm.snapshot(agentId);
+  } catch {
+    send(res, 404, { error: "Unknown agent." });
+    return;
+  }
+  const slugs = swarm.listPages(agentId).map((page) => page.slug);
+  sendHtml(res, renderPageIndex(agentId, slugs));
+}
+
+async function serveNamed(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  swarm: Swarm,
+  handlers: HandlerSandbox,
+  agentId: string,
+  name: string,
+): Promise<void> {
+  let walletAddress = "";
+  let status = "";
+  try {
+    const snapshot = swarm.snapshot(agentId);
+    walletAddress = snapshot.walletAddress;
+    status = snapshot.status;
+  } catch {
+    send(res, 404, { error: "Unknown agent." });
+    return;
+  }
+  const endpoint = swarm.endpoint(agentId, name);
+  if (endpoint) {
+    if (status === "archived") return send(res, 404, { error: "No paid endpoint is offered here." });
+    if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
+    return serveEndpoint(req, res, config, swarm, handlers, agentId, name, walletAddress, endpoint);
+  }
+  if (req.method !== "GET") return send(res, 405, { error: "Method not allowed." });
+  const page = swarm.page(agentId, name);
+  if (!page) return send(res, 404, { error: "No page is published here." });
+  sendHtml(res, renderPublishedPage(agentId, name, page.markdown));
+}
+
+async function serveEndpoint(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  swarm: Swarm,
+  handlers: HandlerSandbox,
+  agentId: string,
+  name: string,
+  walletAddress: string,
+  endpoint: ServedEndpoint,
+): Promise<void> {
+  const body = await readRaw(req, 64 * 1024);
+  if (!body.ok) return send(res, 413, { error: body.error });
+  const signatureHeader = req.headers["payment-signature"];
+  const payment = Array.isArray(signatureHeader) ? signatureHeader[0] : signatureHeader;
+  const challenge = paymentRequirements({
+    config,
+    payTo: walletAddress as `0x${string}`,
+    amountUnits: BigInt(endpoint.priceUnits),
+    resource: `/a/${agentId}/${name}`,
+    description: `Paid endpoint ${name}`,
+  });
+  if (!payment) {
+    writePaymentRequired(res, challenge);
+    return;
+  }
+  const verified = await swarm.verifyInboundPayment(agentId, payment, endpoint.priceUnits);
+  if (!verified.ok) return send(res, 402, { error: verified.error });
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const query: Record<string, string> = {};
+  for (const [key, value] of url.searchParams) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(key) || value.length > 2_000) continue;
+    if (query[key] !== undefined) continue;
+    query[key] = value;
+  }
+  const ran = await handlers.run({
+    snapshotHash: endpoint.snapshotHash,
+    stdin: JSON.stringify({ method: req.method ?? "GET", path: `/a/${agentId}/${name}`, query, body: body.text }),
+  });
+  if (!ran.ok) {
+    swarm.recordEndpointCall({
+      agentId,
+      endpoint: name,
+      priceUnits: endpoint.priceUnits,
+      outcome: ran.code,
+      durationMs: ran.durationMs,
+      bytesOut: ran.bytesOut,
+      failed: ran.code !== "busy",
+    });
+    return send(res, handlerHttpStatus(ran.code), { error: ran.publicReason });
+  }
+  const settled = await swarm.commitInboundPayment(agentId, verified.value);
+  if (!settled.ok) {
+    swarm.recordEndpointCall({
+      agentId,
+      endpoint: name,
+      priceUnits: endpoint.priceUnits,
+      outcome: "settlement",
+      durationMs: ran.durationMs,
+      bytesOut: ran.bytesOut,
+      failed: true,
+    });
+    return send(res, 502, { error: "Settlement failed. The buyer was not charged." });
+  }
+  swarm.recordEndpointCall({
+    agentId,
+    endpoint: name,
+    priceUnits: endpoint.priceUnits,
+    outcome: "ok",
+    durationMs: ran.durationMs,
+    bytesOut: ran.bytesOut,
+    failed: false,
+  });
+  const receipt = { success: true, transaction: settled.value.txHash ?? "", network: caipNetwork(config) };
+  res.writeHead(200, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    [X402_HEADERS.response]: encodeHeaderValue(receipt),
+    "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
+    "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
+  });
+  res.end(ran.output);
+}
+
+function writePaymentRequired(res: ServerResponse, challenge: Record<string, unknown>): void {
+  res.writeHead(402, {
+    "Content-Type": "application/json; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    [X402_HEADERS.required]: encodeHeaderValue(challenge),
+    "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
+    "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
+  });
+  res.end(JSON.stringify(challenge));
+}
+
+function sendHtml(res: ServerResponse, html: string): void {
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy":
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'",
+  });
+  res.end(html);
 }
 
 function adminOk(req: IncomingMessage, expected: string): boolean {
@@ -181,6 +364,18 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   if (res.headersSent) return;
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "X-Content-Type-Options": "nosniff" });
   res.end(JSON.stringify(body));
+}
+
+async function readRaw(req: IncomingMessage, limit: number): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > limit) return { ok: false, error: "Request body is too large." };
+    chunks.push(buffer);
+  }
+  return { ok: true, text: Buffer.concat(chunks).toString("utf8") };
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {

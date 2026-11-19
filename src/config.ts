@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isAddress } from "viem";
+import { selectHandlerImage } from "./handlers.js";
 import { parseUsd } from "./money.js";
 
 const DEFAULT_REDDIT_USER_AGENT = "AutomatonSenses/2.0 (key-free public JSON reader; no OAuth)";
@@ -78,6 +79,13 @@ export interface AppConfig {
   readFeedHourlyLimit: number;
   redditUserAgent: string;
   refDir: string;
+  publishPagePriceUnits: number;
+  serveEndpointPriceUnits: number;
+  serveMinPriceUnits: number;
+  serveMaxPriceUnits: number;
+  handlerTimeoutMs: number;
+  handlerQueueTimeoutMs: number;
+  handlerImage: string;
   toolCosts: Record<string, number>;
 }
 
@@ -105,6 +113,12 @@ function integer(value: string | undefined, fallback: number, name: string): num
     throw new Error(`${name} must be a non-negative number`);
   }
   return Math.floor(parsed);
+}
+
+function atLeast(value: string | undefined, fallback: number, min: number, name: string): number {
+  const parsed = integer(value, fallback, name);
+  if (parsed < min) throw new Error(`${name} must be at least ${min}.`);
+  return parsed;
 }
 
 function privateKey(value: string | undefined, name: string): `0x${string}` | undefined {
@@ -210,6 +224,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (lowMin > normalMin) {
     throw new Error("LOW_MIN_USD cannot be above NORMAL_MIN_USD.");
   }
+  const serveMinPriceUnits = usd(env.SERVE_MIN_PRICE_USD, "0.001", "SERVE_MIN_PRICE_USD");
+  const serveMaxPriceUnits = usd(env.SERVE_MAX_PRICE_USD, "1.00", "SERVE_MAX_PRICE_USD");
+  if (serveMinPriceUnits <= 0) throw new Error("SERVE_MIN_PRICE_USD must be positive.");
+  if (serveMaxPriceUnits < serveMinPriceUnits) {
+    throw new Error("SERVE_MAX_PRICE_USD cannot be below SERVE_MIN_PRICE_USD.");
+  }
+  const agentImage = env.AGENT_IMAGE ?? "automaton:2";
+  const publishPagePriceUnits = usd(env.PUBLISH_PAGE_PRICE_USD, "0.001", "PUBLISH_PAGE_PRICE_USD");
+  const serveEndpointPriceUnits = usd(env.SERVE_ENDPOINT_PRICE_USD, "0.002", "SERVE_ENDPOINT_PRICE_USD");
   const councilModels = (env.COUNCIL_MODELS ?? "meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct")
     .split(",")
     .map((item) => item.trim())
@@ -256,7 +279,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     runtime: runtimeRaw,
     dockerNetwork: env.DOCKER_NETWORK ?? "automaton_default",
     dockerVolume: env.DOCKER_VOLUME ?? "",
-    agentImage: env.AGENT_IMAGE ?? "automaton:2",
+    agentImage,
     orchestratorUrl: env.ORCHESTRATOR_URL ?? "http://orchestrator:4747",
     searchProvider: searchRaw as AppConfig["searchProvider"],
     searxngUrl: env.SEARXNG_URL ?? "",
@@ -287,6 +310,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
     redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
     refDir: path.resolve(env.REF_DIR && env.REF_DIR.trim() ? env.REF_DIR : defaultRefDir()),
+    publishPagePriceUnits,
+    serveEndpointPriceUnits,
+    serveMinPriceUnits,
+    serveMaxPriceUnits,
+    handlerTimeoutMs: atLeast(env.HANDLER_TIMEOUT_MS, 10_000, 1, "HANDLER_TIMEOUT_MS"),
+    handlerQueueTimeoutMs: atLeast(env.HANDLER_QUEUE_TIMEOUT_MS, 10_000, 1, "HANDLER_QUEUE_TIMEOUT_MS"),
+    handlerImage:
+      (env.HANDLER_IMAGE ?? "").trim() || selectHandlerImage(agentImage, env.AGENT_IMAGE_HAS_NODE !== "false"),
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
@@ -297,6 +328,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),
+      publish_page: publishPagePriceUnits,
+      serve_endpoint: serveEndpointPriceUnits,
       remember: parseUsd("0.0001"),
       balance: 0,
       council: 0,

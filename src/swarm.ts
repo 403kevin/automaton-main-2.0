@@ -1,14 +1,16 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import type { Address } from "viem";
+import type { Address, Hex } from "viem";
 import { isAddress } from "viem";
 import type { ChainPort } from "./chain.js";
 import type { Clock } from "./clock.js";
 import type { AppConfig } from "./config.js";
 import { CONSTITUTION_TEXT, constitutionDenyHosts, reviewCommand, reviewText, reviewUrl } from "./constitution.js";
 import { DatabaseSync } from "node:sqlite";
-import { getAgent, getAgentByAddress, getService, kvGet, kvSet, listAgents } from "./db.js";
+import { countEndpoints, countPages, getAgent, getAgentByAddress, getEndpoint, getPage, getService, kvGet, kvSet, listAgents, listPages as listPageRows } from "./db.js";
+import { handlerSnapshotRoot, MAX_ENDPOINTS_PER_AGENT, snapshotHandlerDir } from "./handlers.js";
+import { isPublicSlug, MAX_PAGE_BYTES, MAX_PAGES_PER_AGENT } from "./pages.js";
 import { DEFAULT_GENESIS } from "./genesis.js";
 import { newId, newToken } from "./ids.js";
 import { dayKey, formatUsd } from "./money.js";
@@ -23,8 +25,10 @@ import { rateLimitCounts } from "./http.js";
 import { createWallet, decryptWalletKey } from "./wallet.js";
 import {
   networkMatches,
+  parseDryPayment,
   parseX402Header,
   verifyAuthorization,
+  type AuthorizationMessage,
   type PaymentSettler,
 } from "./x402.js";
 
@@ -33,6 +37,17 @@ export interface ToolAuth {
   handled: boolean;
   output?: string;
   reason?: string;
+}
+
+/** A checked payment that has not moved money yet. Settlement is a separate step. */
+export interface HeldPayment {
+  mode: "dry" | "live";
+  from: Address;
+  units: bigint;
+  nonce: string;
+  priceUnits: number;
+  message?: AuthorizationMessage;
+  signature?: Hex;
 }
 
 export interface CreatedAgent {
@@ -440,6 +455,8 @@ export class Swarm {
         .run(agentId, price, description.slice(0, 500), body.slice(0, 8000), this.clock.now());
       return { ok: true, handled: true, output: `Offering the service at ${formatUsd(price)} via /a/${agentId}` };
     }
+    if (call.name === "publish_page") return this.publishPage(agentId, call);
+    if (call.name === "serve_endpoint") return this.serveEndpoint(agentId, call);
     if (call.name === "spawn_child") {
       const spawned = await this.spawnChild(agentId, String(args.name ?? ""));
       if (!spawned.ok) return { ok: false, reason: spawned.error };
@@ -511,68 +528,92 @@ export class Swarm {
   }
 
   async settleDryPayment(sellerId: string, header: string): Promise<Result<{ body: string; txHash?: string }>> {
-    if (!header.trim().startsWith("dryrun:")) return this.settleX402(sellerId, header);
+    const seller = getAgent(this.db, sellerId);
+    const service = getService(this.db, sellerId);
+    if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
+    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
+    const verified = await this.verifyInboundPayment(sellerId, header, service.priceUnits);
+    if (!verified.ok) return verified;
+    const settled = await this.commitInboundPayment(sellerId, verified.value);
+    if (!settled.ok) return settled;
+    return { ok: true, value: { body: service.body, txHash: settled.value.txHash } };
+  }
+
+  /**
+   * Check a payment without moving money.
+   * Dry-run checks the simulated balance. Live mode checks the EIP-3009 signature locally.
+   * Neither path calls the facilitator or broadcasts a transfer.
+   */
+  async verifyInboundPayment(sellerId: string, header: string, priceUnits: number): Promise<Result<HeldPayment>> {
+    const seller = getAgent(this.db, sellerId);
+    if (!seller) return { ok: false, error: "Unknown agent." };
+    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
+    if (!Number.isSafeInteger(priceUnits) || priceUnits <= 0) return { ok: false, error: "Price is invalid." };
+    const trimmed = header.trim();
+    if (trimmed.startsWith("dryrun:")) return this.verifyDryPayment(seller, trimmed, priceUnits);
+    return this.verifyLivePayment(seller, trimmed, priceUnits);
+  }
+
+  /**
+   * Move money for a payment that already passed verifyInboundPayment.
+   * Dry-run simulates the transfer. Live mode calls the settler (facilitator or direct broadcast) only here.
+   */
+  async commitInboundPayment(sellerId: string, payment: HeldPayment): Promise<Result<{ txHash?: string }>> {
+    const seller = getAgent(this.db, sellerId);
+    if (!seller) return { ok: false, error: "Unknown agent." };
+    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
+    const nonceKey = `nonce:${payment.nonce}`;
+    if (kvGet(this.db, nonceKey)) return { ok: false, error: "Payment nonce was already used." };
+    if (payment.mode === "dry") return this.commitDryPayment(seller, payment, nonceKey);
+    return this.commitLivePayment(seller, payment, nonceKey);
+  }
+
+  recordEndpointCall(input: {
+    agentId: string;
+    endpoint: string;
+    priceUnits: number;
+    outcome: string;
+    durationMs: number;
+    bytesOut: number;
+    failed: boolean;
+  }): void {
+    const message = `endpoint=${input.endpoint} price=${input.priceUnits} outcome=${input.outcome} duration=${Math.max(0, Math.floor(input.durationMs))} bytes=${Math.max(0, Math.floor(input.bytesOut))}`;
+    this.event(input.agentId, input.failed ? "handler_failed" : "paid_call", message);
+  }
+
+  listPages(agentId: string) {
+    return listPageRows(this.db, agentId);
+  }
+
+  page(agentId: string, slug: string) {
+    return getPage(this.db, agentId, slug);
+  }
+
+  endpoint(agentId: string, name: string) {
+    return getEndpoint(this.db, agentId, name);
+  }
+
+  private async verifyDryPayment(seller: AgentRecord, header: string, priceUnits: number): Promise<Result<HeldPayment>> {
     if (this.config.moneyMode !== "dry-run") {
       return { ok: false, error: "Dry-run payment headers are refused when MONEY_MODE=live." };
     }
-    const seller = getAgent(this.db, sellerId);
-    const service = getService(this.db, sellerId);
-    if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
-    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
-    const { parseDryPayment } = await import("./x402.js");
     const payment = parseDryPayment(header);
     if (!payment) return { ok: false, error: "Dry-run payments use PAYMENT-SIGNATURE: dryrun:<from>:<units>:<nonce>." };
-    if (payment.units !== BigInt(service.priceUnits)) {
-      return { ok: false, error: `Price is ${service.priceUnits} units.` };
-    }
+    if (payment.units !== BigInt(priceUnits)) return { ok: false, error: `Price is ${priceUnits} units.` };
     if (payment.from.toLowerCase() === seller.walletAddress.toLowerCase()) {
       return { ok: false, error: "An agent cannot pay itself." };
     }
-    const nonceKey = `nonce:${payment.nonce}`;
-    if (kvGet(this.db, nonceKey)) return { ok: false, error: "Payment nonce was already used." };
+    if (kvGet(this.db, `nonce:${payment.nonce}`)) return { ok: false, error: "Payment nonce was already used." };
     const balance = await this.chain.getBalance(payment.from);
     if (!balance.ok) return { ok: false, error: balance.error };
     if (balance.units < payment.units) return { ok: false, error: "Payer's simulated USDC balance is too low." };
-    const payer = getAgentByAddress(this.db, payment.from);
-    const moved = await this.chain.transferBetween(payment.from, seller.walletAddress, payment.units);
-    if (!moved.ok) return { ok: false, error: moved.error ?? "Transfer failed." };
-    if (payer) {
-      const debited = this.debit(payer.id, service.priceUnits, "x402", `x402-out:${payment.nonce}`, `paid ${seller.name}`);
-      if (!debited.ok) {
-        await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
-        return debited;
-      }
-    }
-    const credited = this.post({
-      agentId: sellerId,
-      kind: "x402_in",
-      amount: service.priceUnits,
-      ref: `x402-in:${payment.nonce}`,
-      note: `from ${payment.from}`,
-    });
-    if (!credited.ok) {
-      await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
-      if (payer) {
-        this.post({
-          agentId: payer.id,
-          kind: "owner_topup",
-          amount: service.priceUnits,
-          ref: `refund:${payment.nonce}`,
-          note: "refund after a failed x402 credit",
-        });
-      }
-      return credited;
-    }
-    kvSet(this.db, nonceKey, "1");
-    this.event(sellerId, "x402_in", `Paid ${formatUsd(service.priceUnits)} by ${payment.from}`);
-    return { ok: true, value: { body: service.body, txHash: moved.txHash } };
+    return {
+      ok: true,
+      value: { mode: "dry", from: payment.from, units: payment.units, nonce: payment.nonce, priceUnits },
+    };
   }
 
-  private async settleX402(sellerId: string, header: string): Promise<Result<{ body: string; txHash?: string }>> {
-    const seller = getAgent(this.db, sellerId);
-    const service = getService(this.db, sellerId);
-    if (!seller || !service) return { ok: false, error: "This agent is not offering a service." };
-    if (seller.status === "archived") return { ok: false, error: "Agent is archived." };
+  private async verifyLivePayment(seller: AgentRecord, header: string, priceUnits: number): Promise<Result<HeldPayment>> {
     const parsed = parseX402Header(header);
     if (!parsed.ok) return parsed;
     if (!networkMatches(this.config, parsed.value.network)) {
@@ -585,32 +626,223 @@ export class Swarm {
     if (message.from.toLowerCase() === seller.walletAddress.toLowerCase()) {
       return { ok: false, error: "An agent cannot pay itself." };
     }
-    if (message.value !== BigInt(service.priceUnits)) {
-      return { ok: false, error: `Price is ${service.priceUnits} units.` };
-    }
+    if (message.value !== BigInt(priceUnits)) return { ok: false, error: `Price is ${priceUnits} units.` };
     const verified = await verifyAuthorization(this.config, message, parsed.value.signature);
     if (!verified.ok) return verified;
-    const nonceKey = `nonce:${message.nonce}`;
-    if (kvGet(this.db, nonceKey)) return { ok: false, error: "Payment nonce was already used." };
+    if (kvGet(this.db, `nonce:${message.nonce}`)) return { ok: false, error: "Payment nonce was already used." };
+    return {
+      ok: true,
+      value: {
+        mode: "live",
+        from: message.from,
+        units: message.value,
+        nonce: message.nonce,
+        priceUnits,
+        message,
+        signature: parsed.value.signature,
+      },
+    };
+  }
+
+  private async commitDryPayment(seller: AgentRecord, payment: HeldPayment, nonceKey: string): Promise<Result<{ txHash?: string }>> {
+    const balance = await this.chain.getBalance(payment.from);
+    if (!balance.ok) return { ok: false, error: balance.error };
+    if (balance.units < payment.units) return { ok: false, error: "Payer's simulated USDC balance is too low." };
+    const payer = getAgentByAddress(this.db, payment.from);
+    const moved = await this.chain.transferBetween(payment.from, seller.walletAddress, payment.units);
+    if (!moved.ok) return { ok: false, error: moved.error ?? "Transfer failed." };
+    if (payer) {
+      const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${payment.nonce}`, `paid ${seller.name}`);
+      if (!debited.ok) {
+        await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
+        return debited;
+      }
+    }
+    const credited = this.post({
+      agentId: seller.id,
+      kind: "x402_in",
+      amount: payment.priceUnits,
+      ref: `x402-in:${payment.nonce}`,
+      note: `from ${payment.from}`,
+    });
+    if (!credited.ok) {
+      await this.chain.transferBetween(seller.walletAddress, payment.from, payment.units);
+      if (payer) {
+        this.post({
+          agentId: payer.id,
+          kind: "owner_topup",
+          amount: payment.priceUnits,
+          ref: `refund:${payment.nonce}`,
+          note: "refund after a failed x402 credit",
+        });
+      }
+      return credited;
+    }
+    kvSet(this.db, nonceKey, "1");
+    this.event(seller.id, "x402_in", `Paid ${formatUsd(payment.priceUnits)} by ${payment.from}`);
+    return { ok: true, value: { txHash: moved.txHash } };
+  }
+
+  private async commitLivePayment(seller: AgentRecord, payment: HeldPayment, nonceKey: string): Promise<Result<{ txHash?: string }>> {
+    if (!payment.message || !payment.signature) return { ok: false, error: "Payment payload is missing authorization or signature." };
     const settler = this.settler ?? new SimulatedSettler(this.chain);
-    const settled = await settler.settle(message, parsed.value.signature);
+    const settled = await settler.settle(payment.message, payment.signature);
     if (!settled.ok) return { ok: false, error: settled.error };
     const credited = this.post({
-      agentId: sellerId,
+      agentId: seller.id,
       kind: "x402_in",
-      amount: service.priceUnits,
+      amount: payment.priceUnits,
       ref: `onchain:${settled.txHash}`,
-      note: `x402 from ${message.from}`,
+      note: `x402 from ${payment.from}`,
     });
     if (!credited.ok) return credited;
-    const payer = getAgentByAddress(this.db, message.from);
+    const payer = getAgentByAddress(this.db, payment.from);
     if (payer) {
-      const debited = this.debit(payer.id, service.priceUnits, "x402", `x402-out:${settled.txHash}`, `paid ${seller.name}`);
+      const debited = this.debit(payer.id, payment.priceUnits, "x402", `x402-out:${settled.txHash}`, `paid ${seller.name}`);
       if (!debited.ok) this.event(payer.id, "ledger_drift", `Settlement ${settled.txHash} confirmed but the payer ledger debit failed: ${debited.error}`);
     }
     kvSet(this.db, nonceKey, settled.txHash);
-    this.event(sellerId, "x402_in", `Settled ${formatUsd(service.priceUnits)} in ${settled.txHash}.`);
-    return { ok: true, value: { body: service.body, txHash: settled.txHash } };
+    this.event(seller.id, "x402_in", `Settled ${formatUsd(payment.priceUnits)} in ${settled.txHash}.`);
+    return { ok: true, value: { txHash: settled.txHash } };
+  }
+
+  private async publishPage(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const slug = String(call.arguments?.slug ?? "").trim();
+    const markdown = String(call.arguments?.markdown ?? "");
+    if (!isPublicSlug(slug)) {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug.slice(0, 40)} cost=0`);
+      return { ok: false, reason: "slug must be 1-40 characters of lowercase letters, numbers, or dashes." };
+    }
+    if (Buffer.byteLength(markdown, "utf8") > MAX_PAGE_BYTES) {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
+      return { ok: false, reason: "Page is larger than 200 KB." };
+    }
+    if (markdown.trim() === "") {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
+      return { ok: false, reason: "Page is empty." };
+    }
+    const review = reviewText(markdown);
+    if (!review.allowed) return this.blocked(agentId, `Law ${review.law}: ${review.reason}`);
+    if (getEndpoint(this.db, agentId, slug)) {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
+      return { ok: false, reason: "That name is already a paid endpoint." };
+    }
+    const existing = getPage(this.db, agentId, slug);
+    if (!existing && countPages(this.db, agentId) >= MAX_PAGES_PER_AGENT) {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
+      return { ok: false, reason: `Page cap is ${MAX_PAGES_PER_AGENT}.` };
+    }
+    const cost = this.config.publishPagePriceUnits;
+    if (cost > 0) {
+      const charged = this.debit(agentId, cost, "tool", `tool:${call.id}`, "publish_page");
+      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (charged.value.duplicate) return { ok: false, reason: "publish_page call was already billed." };
+    }
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO pages (agent_id, slug, markdown, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(agent_id, slug) DO UPDATE SET markdown = excluded.markdown, updated_at = excluded.updated_at`,
+        )
+        .run(agentId, slug, markdown, this.clock.now());
+    } catch (error) {
+      this.refundTool(agentId, cost, `refund:publish:${call.id}`, "publish_page refund");
+      const reason = error instanceof Error ? error.message : "Could not save the page.";
+      return { ok: false, reason };
+    }
+    const bytes = Buffer.byteLength(markdown, "utf8");
+    this.event(agentId, "publish_page", `outcome=ok slug=${slug} bytes=${bytes} cost=${cost}`);
+    return { ok: true, handled: true, output: `Published /a/${agentId}/${slug} (${bytes} bytes).` };
+  }
+
+  private async serveEndpoint(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return { ok: false, reason: "Unknown agent." };
+    const name = String(call.arguments?.name ?? "").trim();
+    const handlerDir = String(call.arguments?.handler_dir ?? call.arguments?.handlerDir ?? "").trim();
+    if (!isPublicSlug(name)) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name.slice(0, 40)} cost=0`);
+      return { ok: false, reason: "name must be 1-40 characters of lowercase letters, numbers, or dashes." };
+    }
+    if (!isPublicSlug(handlerDir)) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: "handler_dir must be one directory name of 1-40 lowercase letters, numbers, or dashes." };
+    }
+    let price = 0;
+    try {
+      price = (await import("./money.js")).parseUsd(String(call.arguments?.price_usd ?? call.arguments?.priceUsd ?? ""));
+    } catch (error) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: error instanceof Error ? error.message : "Bad price." };
+    }
+    if (price < this.config.serveMinPriceUnits || price > this.config.serveMaxPriceUnits) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} price=${price} cost=0`);
+      return {
+        ok: false,
+        reason: `price_usd must be from ${formatUsd(this.config.serveMinPriceUnits)} to ${formatUsd(this.config.serveMaxPriceUnits)}.`,
+      };
+    }
+    if (getPage(this.db, agentId, name)) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: "That name is already a published page." };
+    }
+    const existing = getEndpoint(this.db, agentId, name);
+    if (!existing && countEndpoints(this.db, agentId) >= MAX_ENDPOINTS_PER_AGENT) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: `Endpoint cap is ${MAX_ENDPOINTS_PER_AGENT}.` };
+    }
+    const snap = snapshotHandlerDir({
+      workspace: agent.workspace,
+      handlerDir,
+      storeRoot: handlerSnapshotRoot(this.config.dataDir),
+    });
+    if (!snap.ok) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: snap.error };
+    }
+    const cost = this.config.serveEndpointPriceUnits;
+    if (cost > 0) {
+      const charged = this.debit(agentId, cost, "tool", `tool:${call.id}`, "serve_endpoint");
+      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (charged.value.duplicate) return { ok: false, reason: "serve_endpoint call was already billed." };
+    }
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO endpoints (agent_id, name, price_units, snapshot_hash, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(agent_id, name) DO UPDATE SET price_units = excluded.price_units, snapshot_hash = excluded.snapshot_hash, updated_at = excluded.updated_at`,
+        )
+        .run(agentId, name, price, snap.hash, this.clock.now());
+    } catch (error) {
+      this.refundTool(agentId, cost, `refund:serve:${call.id}`, "serve_endpoint refund");
+      const reason = error instanceof Error ? error.message : "Could not register the endpoint.";
+      return { ok: false, reason };
+    }
+    this.event(agentId, "serve_endpoint", `outcome=ok endpoint=${name} price=${price} snapshot=${snap.hash} cost=${cost}`);
+    return {
+      ok: true,
+      handled: true,
+      output: `Registered /a/${agentId}/${name} at ${formatUsd(price)}. Snapshot ${snap.hash.slice(0, 12)}.`,
+    };
+  }
+
+  private refundTool(agentId: string, units: number, ref: string, note: string): void {
+    if (units <= 0) return;
+    const posted = this.post({ agentId, kind: "tool", amount: units, ref, note });
+    if (!posted.ok || posted.value.duplicate) return;
+    this.db
+      .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'tool', ?, ?)")
+      .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
   }
 
   async syncChain(): Promise<void> {

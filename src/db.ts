@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import type { AgentRecord, AgentStatus, ServiceOffer } from "./types.js";
+import type { AgentRecord, AgentStatus, PublishedPage, ServedEndpoint, ServiceOffer } from "./types.js";
 
 const SCHEMA = `
 PRAGMA journal_mode = WAL;
@@ -71,6 +71,23 @@ CREATE TABLE IF NOT EXISTS services (
   description TEXT NOT NULL,
   body TEXT NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pages (
+  agent_id TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  markdown TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, slug)
+);
+
+CREATE TABLE IF NOT EXISTS endpoints (
+  agent_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  price_units INTEGER NOT NULL,
+  snapshot_hash TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (agent_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS nonces (
@@ -163,6 +180,51 @@ export function getAgentByAddress(db: DatabaseSync, address: string): AgentRecor
 export function listAgents(db: DatabaseSync): AgentRecord[] {
   const rows = db.prepare("SELECT * FROM agents ORDER BY created_at ASC").all() as unknown as AgentRow[];
   return rows.map(mapAgent);
+}
+
+export function listPages(db: DatabaseSync, agentId: string): PublishedPage[] {
+  const rows = db
+    .prepare("SELECT slug, markdown, updated_at FROM pages WHERE agent_id = ? ORDER BY slug ASC")
+    .all(agentId) as unknown as { slug: string; markdown: string; updated_at: number }[];
+  return rows.map((row) => ({ slug: row.slug, markdown: row.markdown, updatedAt: row.updated_at }));
+}
+
+export function getPage(db: DatabaseSync, agentId: string, slug: string): PublishedPage | undefined {
+  const row = db
+    .prepare("SELECT slug, markdown, updated_at FROM pages WHERE agent_id = ? AND slug = ?")
+    .get(agentId, slug) as { slug: string; markdown: string; updated_at: number } | undefined;
+  if (!row) return undefined;
+  return { slug: row.slug, markdown: row.markdown, updatedAt: row.updated_at };
+}
+
+export function countPages(db: DatabaseSync, agentId: string): number {
+  const row = db.prepare("SELECT COUNT(*) AS n FROM pages WHERE agent_id = ?").get(agentId) as { n: number };
+  return row.n;
+}
+
+export function listEndpoints(db: DatabaseSync, agentId: string): ServedEndpoint[] {
+  const rows = db
+    .prepare("SELECT name, price_units, snapshot_hash, updated_at FROM endpoints WHERE agent_id = ? ORDER BY name ASC")
+    .all(agentId) as unknown as { name: string; price_units: number; snapshot_hash: string; updated_at: number }[];
+  return rows.map((row) => ({
+    name: row.name,
+    priceUnits: row.price_units,
+    snapshotHash: row.snapshot_hash,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export function getEndpoint(db: DatabaseSync, agentId: string, name: string): ServedEndpoint | undefined {
+  const row = db
+    .prepare("SELECT name, price_units, snapshot_hash, updated_at FROM endpoints WHERE agent_id = ? AND name = ?")
+    .get(agentId, name) as { name: string; price_units: number; snapshot_hash: string; updated_at: number } | undefined;
+  if (!row) return undefined;
+  return { name: row.name, priceUnits: row.price_units, snapshotHash: row.snapshot_hash, updatedAt: row.updated_at };
+}
+
+export function countEndpoints(db: DatabaseSync, agentId: string): number {
+  const row = db.prepare("SELECT COUNT(*) AS n FROM endpoints WHERE agent_id = ?").get(agentId) as { n: number };
+  return row.n;
 }
 
 export function getService(db: DatabaseSync, agentId: string): ServiceOffer | undefined {

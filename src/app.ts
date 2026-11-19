@@ -12,13 +12,15 @@ import { createLlm } from "./llm.js";
 import { createSearch } from "./search.js";
 import { LiveSettler } from "./settle.js";
 import { Swarm } from "./swarm.js";
-import { createRuntime, FakeRuntime } from "./runtime.js";
+import { HandlerSandbox, handlerSnapshotRoot } from "./handlers.js";
+import { createRuntime, detectDockerBinary, FakeRuntime } from "./runtime.js";
 
 export interface AppContext {
   config: AppConfig;
   swarm: Swarm;
   host: DirectHost;
   clock: OffsetClock;
+  handlers: HandlerSandbox;
 }
 
 export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
@@ -62,5 +64,14 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
     });
   });
   swarm.setRuntime(runtime);
-  return { config, swarm, host, clock };
+  const docker = await detectDockerBinary();
+  const handlers = new HandlerSandbox({
+    docker: docker ?? ["docker"],
+    image: config.handlerImage,
+    snapshotRoot: handlerSnapshotRoot(config.dataDir),
+    dockerVolume: config.dockerVolume,
+    timeoutMs: config.handlerTimeoutMs,
+    queueTimeoutMs: config.handlerQueueTimeoutMs,
+  });
+  return { config, swarm, host, clock, handlers };
 }
