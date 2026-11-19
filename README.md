@@ -146,6 +146,17 @@ Dry-run with `LLM_MODE=mock` costs nothing. OpenRouter charges the API key on yo
 
 Base Sepolia gas comes from the Coinbase CDP faucet at https://portal.cdp.coinbase.com/products/faucet. Alchemy's faucet requires mainnet history, so use Coinbase for a fresh gas-funder wallet. Test USDC comes from Circle's faucet. Mainnet USDC and gas are real. A dead agent's remaining USDC is sent to the treasury only after a successful sweep, which first tops up ETH when `GAS_FUNDER_PRIVATE_KEY` is set.
 
+## Before every run
+
+From the repo root, install the metadata drop, then prove the host is closed:
+
+```bash
+sudo scripts/host-firewall.sh
+scripts/preflight.sh
+```
+
+The firewall script needs root. Preflight prints PASS, FAIL, or SKIP for each check and exits non-zero if any check fails. A SKIP counts as a failure unless you pass `--allow-skip`.
+
 ## Seven-day Base Sepolia soak
 
 This is the profile in `config/soak.sepolia.env`. It is live testnet money, three seed agents (`mite`, `keel`, `wick`), a 5-minute turn, $0.05 ledger rent per day, a $0.25 per-agent and $0.60 global daily spend cap, and a daily report at `data/reports/YYYY-MM-DD.md` that the dashboard also shows. The constitution checks are unchanged.
