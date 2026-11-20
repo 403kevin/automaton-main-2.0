@@ -12,6 +12,11 @@ export type Metric = (typeof METRICS)[number];
 export const OPS = [">=", "<=", "="] as const;
 export type Op = (typeof OPS)[number];
 
+/** The two metrics an agent can raise by its own actions (BO-2.5). Income from outside is the only real-world signal. */
+export const SELF_INFLATABLE: readonly Metric[] = ["sense_results", "test_deliveries_ok"];
+export const SELF_INFLATABLE_NOTE =
+  "Hit rates on sense_results and test_deliveries_ok are self-inflatable: an agent can raise them by its own actions. income_outside_units is the only real-world signal.";
+
 export const PREDICT_MAX_OPEN = 20;
 export const PREDICT_NOTE_MAX_CHARS = 300;
 export const PREDICT_MIN_HOURS = 1;
@@ -189,7 +194,7 @@ export function predictionReportLines(db: DatabaseSync, since: number, names: Ma
   const lines = ["## Predictions", ""];
   const ids = [...new Set([...settled.map((row) => row.agent_id), ...open.map((row) => row.agent_id)])];
   if (ids.length === 0) {
-    lines.push("- None in the last day.", "");
+    lines.push("- None in the last day.", "", SELF_INFLATABLE_NOTE, "");
     return lines;
   }
   lines.push("Last 24 hours. Scored by the runtime from the agent's own facts.", "");
@@ -204,6 +209,16 @@ export function predictionReportLines(db: DatabaseSync, since: number, names: Ma
   });
   entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) lines.push(entry.line);
-  lines.push("");
+  const byMetric = db
+    .prepare(
+      "SELECT metric, COUNT(*) AS n, SUM(CASE WHEN status = 'hit' THEN 1 ELSE 0 END) AS hits FROM predictions WHERE status IN ('hit', 'miss') AND settled_at >= ? GROUP BY metric",
+    )
+    .all(since) as unknown as Array<{ metric: string; n: number; hits: number }>;
+  lines.push("", "By metric:");
+  for (const metric of METRICS) {
+    const row = byMetric.find((item) => item.metric === metric);
+    lines.push(`- ${metric}: settled ${row?.n ?? 0}, hits ${row?.hits ?? 0}${SELF_INFLATABLE.includes(metric) ? " (self-inflatable)" : ""}`);
+  }
+  lines.push("", SELF_INFLATABLE_NOTE, "");
   return lines;
 }

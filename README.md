@@ -211,6 +211,12 @@ The owner changes an agent's models with `POST /admin/agents/<id>/model` and the
 
 Compose passes every setting through: the plain path reads `.env` and the safe path (`docker-compose.safe.yml`) requires `.env.soak`. No compose file gives a secret a default; the safe file refuses to start without them.
 
+## The daily report
+
+The report is written to `data/reports/YYYY-MM-DD.md` (inside the orchestrator container: `/app/data/reports`, in the Docker volume `automaton-data`) and the dashboard shows the latest. After its header and the "Agents" and "Notable actions" blocks it has these sections, always in this order: Runtime observed (per agent turns, tool calls, evidence coverage, spend against the caps, tier and balance, then the four Stage 3 exit numbers with pass or fail), Agent said (claims and offer text, labelled unchecked, fenced, cleaned and short), Claims (verified/unverified), Refusals, Offers and test deliveries, Money (outside income is the only line labelled a real-world signal; sibling income and top-ups are shown apart), Senses usage, Lost wakes (with the rate against turns), Model reliability, Predictions (the `sense_results` and `test_deliveries_ok` hit rates are marked self-inflatable) and Breaches ("None." when empty). It only describes what happened; it never ranks an agent or suggests what to sell.
+
+To copy the reports to your own machine (Git Bash or WSL), run `scripts/pull-reports.sh <user@host> <local-dir>`. It uses your SSH key, runs `docker compose cp` on the server over SSH (the reports are in a Docker volume, not a host folder), unpacks the stream into `<local-dir>/reports` and writes nothing on the server. The project folder on the server is `$AUTOMATON_REMOTE_DIR` (default `automaton`).
+
 ## Hands: browse (off by default)
 
 `browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.

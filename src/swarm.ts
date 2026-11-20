@@ -41,6 +41,17 @@ import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
 import { modelReliabilityLines } from "./model-report.js";
 import {
+  agentSaidLines,
+  breachesLines,
+  claimsLines,
+  lostWakesLines,
+  moneyLines,
+  offersLines,
+  runtimeObservedLines,
+  sensesLines,
+  type ReportContext,
+} from "./report-v2.js";
+import {
   HOUR_MS,
   insertPrediction,
   openCount,
@@ -1518,12 +1529,31 @@ export class Swarm {
     }
     lines.push("## Notable actions");
     if (notable.length === 0) lines.push("- None in the last day.");
+    // A swarm wallet is shown by its agent's name: the address is random per agent and says less than the name does.
+    const swarmWallets = agents.map((agent) => ({ address: agent.walletAddress, name: sanitizeSenseText(agent.name) }));
+    const shown = (text: string) => swarmWallets.reduce((out, wallet) => out.split(wallet.address).join(`${wallet.name}'s wallet`), text);
     for (const event of notable.slice(-40)) {
-      lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${event.message}`);
+      lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${shown(event.message)}`);
     }
     lines.push("");
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));
+    const context: ReportContext = {
+      db: this.db,
+      now,
+      since,
+      agents: alive.map((agent) => ({ id: agent.id, name: agent.name, tier: tierFor(agent.balanceUnits, this.config), balanceUnits: agent.balanceUnits })),
+      names,
+      agentCapUnits: this.config.agentDailyCapUnits,
+      globalCapUnits: this.config.globalDailyCapUnits,
+    };
+    lines.push(...runtimeObservedLines(context));
+    lines.push(...agentSaidLines(context));
+    lines.push(...claimsLines(context));
     lines.push(...refusalReportLines(this.db, since, names));
+    lines.push(...offersLines(context));
+    lines.push(...moneyLines(context));
+    lines.push(...sensesLines(context));
+    lines.push(...lostWakesLines(context));
     lines.push(
       ...modelReliabilityLines(
         this.db,
@@ -1533,6 +1563,7 @@ export class Swarm {
       ),
     );
     lines.push(...predictionReportLines(this.db, since, names));
+    lines.push(...breachesLines(context));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
