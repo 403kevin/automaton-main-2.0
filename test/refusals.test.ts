@@ -556,7 +556,10 @@ describe("the daily report", () => {
 
   it("counts only the last 24 hours and says so when there is nothing", async () => {
     const box = await rig();
-    expect(box.swarm.writeDailyReport().markdown).toContain("None in the last day.");
+    const empty = box.swarm.writeDailyReport().markdown;
+    // "None in the last day." already appears under "Notable actions", so look only inside the Refusals section.
+    expect(empty).toContain("## Refusals");
+    expect(empty.slice(empty.indexOf("## Refusals"))).toContain("None in the last day.");
     await run(box, "teleport", {});
     box.clock.advance(86_400_001);
     await run(box, "claim_payment", { amount: "1" });
