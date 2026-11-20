@@ -269,14 +269,17 @@ describe("offer_service and links", () => {
     expect(later.ok).toBe(true);
   });
 
-  it("does not check another agent's paths", async () => {
+  it("does not existence-check another agent's paths, and treats an absolute URL to one as an outside URL", async () => {
     const box = await rig();
     const other = await box.swarm.createAgent({ name: "other" });
     if (!other.ok) throw new Error(other.error);
-    const description = `Friend: /a/${other.value.id}/thing and http://host.example/a/${other.value.id}/thing`;
-    const ok = await box.swarm.handleTool(box.id, call("offer_service", { priceUsd: "0.01", description, body: "ok" }));
-    expect(ok.ok).toBe(true);
+    const relative = await box.swarm.handleTool(box.id, call("offer_service", { priceUsd: "0.01", description: `Friend: /a/${other.value.id}/thing`, body: "ok" }));
+    expect(relative.ok).toBe(true);
     expect(box.urls.checked).toEqual([]);
+    const absolute = `http://host.example/a/${other.value.id}/thing`;
+    const withUrl = await box.swarm.handleTool(box.id, call("offer_service", { priceUsd: "0.01", description: `Friend: ${absolute}`, body: "ok" }));
+    expect(withUrl.ok).toBe(true);
+    expect(box.urls.checked).toEqual([absolute]);
   });
 
   it("refuses an outside URL when no checker is set (fails closed)", async () => {
@@ -410,7 +413,8 @@ describe("server: listing, preview and 404", () => {
       config: { ...box.config, port: 0, host: "127.0.0.1" },
       swarm: box.swarm,
       host: {} as DirectHost,
-      handlers: {} as HandlerSandbox,
+      // No handler runs in these tests; server.close() calls shutdown() on the sandbox.
+      handlers: { shutdown: async () => undefined } as unknown as HandlerSandbox,
       background: false,
     });
     cleanups.push(() => server.close());
