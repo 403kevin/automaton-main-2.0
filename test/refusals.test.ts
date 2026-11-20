@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { HttpHost } from "../src/agent/http-host.js";
 import { runAgentLoop, type AgentHost } from "../src/agent/loop.js";
@@ -10,6 +11,7 @@ import type { HandlerRunResult, HandlerSandbox } from "../src/handlers.js";
 import { DirectHost } from "../src/host.js";
 import type { InferenceGateway } from "../src/inference.js";
 import { parseUsd } from "../src/money.js";
+import { asRuleId, RULE_IDS } from "../src/refusals.js";
 import { startServer } from "../src/server.js";
 import {
   SensesRequestError,
@@ -592,5 +594,29 @@ describe("migration", () => {
     const again = openDatabase(file);
     expect(again.prepare("SELECT COUNT(*) AS n FROM endpoints").get()).toEqual({ n: 1 });
     again.close();
+  });
+});
+
+describe("the rule list", () => {
+  // These guards were written after the implementation and passed on their first run; they cannot be shown RED.
+  it("is closed: unique, ending in unclassified, and anything else is coerced to it", () => {
+    expect(new Set(RULE_IDS).size).toBe(RULE_IDS.length);
+    expect(RULE_IDS.at(-1)).toBe("unclassified");
+    expect(asRuleId("made.up")).toBe("unclassified");
+    expect(asRuleId(42)).toBe("unclassified");
+    expect(asRuleId("spend.cap")).toBe("spend.cap");
+  });
+
+  it("contains every rule the cases above expect", () => {
+    for (const item of CASES) expect(RULE_IDS as readonly string[]).toContain(item.rule);
+  });
+
+  it("has no single-line tool refusal in swarm.ts that returns a reason without a rule", () => {
+    const flag = (source: string) =>
+      source.split("\n").filter((line) => /\{ ok: false, reason\b/.test(line) && !/\brule\b/.test(line) && !line.trim().startsWith("//"));
+    expect(flag("    return { ok: false, reason: 'x' };")).toHaveLength(1);
+    expect(flag("    return { ok: false, reason: 'x', rule: 'input.invalid' };")).toHaveLength(0);
+    const swarm = fs.readFileSync(fileURLToPath(new URL("../src/swarm.ts", import.meta.url)), "utf8");
+    expect(flag(swarm)).toEqual([]);
   });
 });

@@ -185,6 +185,12 @@ The runtime checks that an offer works. It never judges what is sold.
 
 Facts are written only by the runtime, and no tool writes them. There is one per `ok` sense result (subject is the URL or tool, value is the output hash, source `evidence:<id>`), one per incoming credit (source `ledger:<id>`, with a `payer_class` of `owner` for a top-up, `sibling` for a child's endowment, or the payer's class for income) and one per endpoint test run. The wake-up message shows the agent its own last 10 facts and last 10 claims, at most 1200 characters, inside an `OWN_RECORDS` fence. No agent sees another's records.
 
+## Refusal records
+
+Every refused tool call writes one row to the `refusals` table: the agent, the tool, a rule ID from a closed list (for example `kill_switch`, `constitution.I`, `spend.cap`, `limit.hourly.see_page`, `claim.evidence`, `offer.test_failed`, `offer.link_dead`, `sense.error`, `local.symlink`; a refusal with no rule is `unclassified`), a reason of at most 300 characters, and a source. `runtime` rows are written by the orchestrator. `agent` rows are reported by the agent's own process; that container could send anything, so they are lower trust, limited to the three `local.*` rules, and kept to 200 an hour per agent. A successful call writes nothing. The daily report has a "## Refusals" section with the counts by rule, in total and per agent, with the agent-reported rows listed apart.
+
+Free gate attempts are capped. `OFFER_CHECK_HOURLY_LIMIT` (default 20) counts an agent's refused endpoint tests and refused link checks in the last hour; over it, the call is refused before any sandbox run or URL check, with rule `limit.offer_checks`. The query given as `sample_query` to `serve_endpoint` is stored, and every re-test uses it.
+
 ## Hands: browse (off by default)
 
 `browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.
