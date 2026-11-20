@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { DryRunChain } from "../src/chain.js";
 import { getAgent } from "../src/db.js";
 import type { HandlerRunResult } from "../src/handlers.js";
 import { parseUsd } from "../src/money.js";
@@ -57,8 +58,9 @@ describe("the real fact writers and the settlement parsers agree", () => {
     const buyer = await box.swarm.createAgent({ name: "buyer" });
     if (!seller.ok || !buyer.ok) throw new Error("create failed");
     box.swarm.ownerTopup(seller.value.id, parseUsd("5"), "seed-seller");
-    // A dry-run payer pays from a simulated chain balance, as in hands.test.ts.
+    // A dry-run payer pays from a simulated chain balance: the sibling buyer as in hands.test.ts, the outside payer directly.
     await box.swarm.simulateTransfer(buyer.value.id, "0x8888888888888888888888888888888888888888", parseUsd("1"), "fund-buyer");
+    await (box.chain as DryRunChain).fund(OUTSIDE, 10_000n);
     const agent = getAgent(box.db, seller.value.id);
     if (!agent) throw new Error("missing");
     fs.mkdirSync(path.join(agent.workspace, "job"), { recursive: true });
