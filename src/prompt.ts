@@ -20,5 +20,6 @@ export function buildSystemPrompt(snapshot: AgentSnapshot): string {
 
 export function buildWakeup(snapshot: AgentSnapshot): string {
   const recent = snapshot.recentTurns.length ? `Recent actions:\n${snapshot.recentTurns.join("\n")}` : "No earlier actions.";
-  return `It is your turn. Balance ${snapshot.balance}, tier ${snapshot.tier}. ${recent}\nChoose a lawful next action, or say you are waiting.`;
+  const records = snapshot.ownRecords ? `\n${snapshot.ownRecords}` : "";
+  return `It is your turn. Balance ${snapshot.balance}, tier ${snapshot.tier}. ${recent}${records}\nChoose a lawful next action, or say you are waiting.`;
 }

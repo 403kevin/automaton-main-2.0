@@ -14,7 +14,7 @@ export interface ScanResult {
   flags: string[];
 }
 
-export const SENSE_TOOLS = ["see_page", "crawl_site", "read_feed", "browse", "fetch_url"] as const;
+export const SENSE_TOOLS = ["see_page", "crawl_site", "read_feed", "browse", "fetch_url", "web_search"] as const;
 export const QUARANTINE_EXCERPT_CHARS = 200;
 
 const FENCE_OPEN = "<<<SENSE_DATA";
@@ -25,7 +25,7 @@ const TRUNCATED = "[truncated]";
 const HIDDEN_CHARS = /[\u0000​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
 const HAS_HIDDEN_CHARS = /[\u0000​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
 const HTML_COMMENT = /<!--([\s\S]*?)-->/g;
-const FENCE_MARKER = /<<<\s*(?:END_)?SENSE_DATA/gi;
+const FENCE_MARKER = /<<<\s*(?:END_)?(?:SENSE_DATA|OWN_RECORDS)/gi;
 const ADDRESS = "0x[0-9a-fA-F]{40}";
 
 const INSTRUCTION = [
@@ -164,7 +164,7 @@ export function scanSenseText(text: string): ScanResult {
   for (const flag of meaningFlags(stripHidden(text))) flags.add(flag);
   if (hasHiddenText(text)) flags.add("hidden_text");
   if (hasObfuscation(text)) flags.add("obfuscation");
-  if (/<<<\s*(END_)?SENSE_DATA/i.test(text)) flags.add("fence_forgery");
+  if (/<<<\s*(?:END_)?(?:SENSE_DATA|OWN_RECORDS)/i.test(text)) flags.add("fence_forgery");
   return { level: levelFor(flags), flags: [...flags] };
 }
 
@@ -245,7 +245,7 @@ export function guardSenseText(tool: string, raw: string): Guarded {
 /** Cut a note to max characters. A fenced note is cut inside the fence so the closing line survives. */
 export function truncateInsideFence(text: string, max: number): string {
   if (text.length <= max) return text;
-  const footer = new RegExp(`${FENCE_CLOSE} nonce=[0-9a-f]+>>>$`).exec(text)?.[0];
+  const footer = /<<<END_(?:SENSE_DATA|OWN_RECORDS) nonce=[0-9a-f]+>>>$/.exec(text)?.[0];
   if (!footer) return text.slice(0, max);
   const tail = `\n${TRUNCATED}\n${footer}`;
   const room = max - tail.length;

@@ -2,6 +2,7 @@
 
 Spec for ORDER BO-2.1 (section 17 of `AUTOMATON_COLLAB_FOR_GROK.md`). The plan's BO-2.1 ("Evidence ledger + `claim` + facts") is split with Kevin's approval: this spec covers the `evidence` table and the tripwires. `claim` and `facts` are BO-2.1b.
 Format: `to-spec` (mattpocock/skills). The spec lives in `repo/specs/` because `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
+Follow-up: [BO-2.1b](BO-2.1b-claim-facts.md) adds the `claim` tool, the `claims` and `facts` tables and routes `web_search` through the same wrapper.
 Follow-up: [BO-2.1c](BO-2.1c-raw-out.md) moves the raw crawl, feed and browse files out of the workspace, adds the `write_file` realpath rule and routes `fetch_url` through the tripwires. It supersedes the "known remaining path" in the Read-back section below.
 
 ## Problem Statement

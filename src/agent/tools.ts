@@ -33,6 +33,7 @@ export const TOOL_DEFINITIONS = [
   { name: "pay_request", description: "Pay another local agent's x402 offer from your wallet, up to maxUsd.", parameters: { url: { type: "string" }, maxUsd: { type: "string" } }, required: ["url", "maxUsd"] },
   { name: "council", description: "Pay the council fee to ask the configured models and receive one synthesis.", parameters: { question: { type: "string" } }, required: ["question"] },
   { name: "spawn_child", description: "If you are in earned profit, pay the endowment from your ledger and spawn a child.", parameters: { name: { type: "string" } }, required: ["name"] },
+  { name: "claim", description: "Record a statement you believe, with the ids of the evidence it rests on (the evidence:<id> entries in your own records). It is marked verified only if every id is one of your own usable evidence rows; with no ids it is stored as unverified; a bad id rejects it. It does not credit income. Debited from your ledger when accepted; a rejected claim costs nothing but counts toward an hourly limit.", parameters: { statement: { type: "string" }, evidence_ids: { type: "array", items: { type: "number" } } }, required: ["statement"] },
   { name: "remember", description: "Append a strategy note. This does not credit income.", parameters: { note: { type: "string" } }, required: ["note"] },
   { name: "balance", description: "Read your ledger balance, tier, and rent. This does not change the ledger.", parameters: {}, required: [] },
 ];

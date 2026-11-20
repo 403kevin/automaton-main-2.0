@@ -124,6 +124,30 @@ CREATE TABLE IF NOT EXISTS evidence (
 );
 
 CREATE INDEX IF NOT EXISTS evidence_agent ON evidence(agent_id, id);
+
+CREATE TABLE IF NOT EXISTS claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  evidence_ids TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  threat_level TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS claims_agent ON claims(agent_id, id);
+
+CREATE TABLE IF NOT EXISTS facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  value TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS facts_agent ON facts(agent_id, id);
 CREATE INDEX IF NOT EXISTS ledger_agent ON ledger_entries(agent_id);
 CREATE INDEX IF NOT EXISTS spend_day ON spend(day, agent_id);
 `;
