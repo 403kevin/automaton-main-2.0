@@ -41,6 +41,10 @@ export interface AppConfig {
   replicationReserveUnits: number;
   councilFeeUnits: number;
   councilModels: string[];
+  /** Models OpenRouter tries, in order, when the primary fails. At most 3. Empty means no fallback. */
+  fallbackModels: string[];
+  /** USD per million tokens by model id, used when OpenRouter returns no cost. Empty by default. */
+  modelPrices: Record<string, ModelPrice>;
   inferenceReserveUnits: number;
   defaultModel: string;
   lowModel: string;
@@ -126,6 +130,49 @@ function integer(value: string | undefined, fallback: number, name: string): num
     throw new Error(`${name} must be a non-negative number`);
   }
   return Math.floor(parsed);
+}
+
+export interface ModelPrice {
+  promptPerM: number;
+  completionPerM: number;
+}
+
+export const MAX_FALLBACK_MODELS = 3;
+
+/** Comma-separated model ids: trimmed, empty entries dropped, duplicates removed (order kept), at most 3. */
+function parseFallbackModels(raw: string | undefined): string[] {
+  const models: string[] = [];
+  for (const item of (raw ?? "").split(",")) {
+    const model = item.trim();
+    if (model && !models.includes(model)) models.push(model);
+  }
+  if (models.length > MAX_FALLBACK_MODELS) {
+    throw new Error(`FALLBACK_MODELS can list at most ${MAX_FALLBACK_MODELS} models.`);
+  }
+  return models;
+}
+
+/** MODEL_PRICES is JSON: { "<model id>": { "promptPerM": <usd>, "completionPerM": <usd> } }. Empty means none. */
+function parseModelPrices(raw: string | undefined): Record<string, ModelPrice> {
+  if (!raw || raw.trim() === "") return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("MODEL_PRICES must be JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("MODEL_PRICES must be a JSON object of model ids.");
+  const prices: Record<string, ModelPrice> = {};
+  for (const [model, entry] of Object.entries(parsed as Record<string, unknown>)) {
+    const price = entry as { promptPerM?: unknown; completionPerM?: unknown } | null;
+    const prompt = price?.promptPerM;
+    const completion = price?.completionPerM;
+    if (typeof prompt !== "number" || !Number.isFinite(prompt) || prompt < 0 || typeof completion !== "number" || !Number.isFinite(completion) || completion < 0) {
+      throw new Error(`MODEL_PRICES entry ${model} needs promptPerM and completionPerM, numbers of 0 or more.`);
+    }
+    prices[model] = { promptPerM: prompt, completionPerM: completion };
+  }
+  return prices;
 }
 
 function atLeast(value: string | undefined, fallback: number, min: number, name: string): number {
@@ -252,6 +299,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     .filter(Boolean)
     .slice(0, 5);
 
+  const fallbackModels = parseFallbackModels(env.FALLBACK_MODELS);
+  const modelPrices = parseModelPrices(env.MODEL_PRICES);
+
   return {
     host: env.HOST ?? "0.0.0.0",
     port: integer(env.PORT, 4747, "PORT"),
@@ -282,6 +332,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     replicationReserveUnits: usd(env.REPLICATION_RESERVE_USD, "1.00", "REPLICATION_RESERVE_USD"),
     councilFeeUnits: usd(env.COUNCIL_FEE_USD, "0.02", "COUNCIL_FEE_USD"),
     councilModels,
+    fallbackModels,
+    modelPrices,
     inferenceReserveUnits: usd(env.INFERENCE_RESERVE_USD, "0.02", "INFERENCE_RESERVE_USD"),
     defaultModel: env.DEFAULT_MODEL || "meta-llama/llama-3.1-8b-instruct",
     lowModel: env.LOW_COMPUTE_MODEL || "meta-llama/llama-3.1-8b-instruct",

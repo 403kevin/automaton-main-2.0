@@ -197,6 +197,12 @@ Every refused tool call writes one row to the `refusals` table: the agent, the t
 
 Free gate attempts are capped. `OFFER_CHECK_HOURLY_LIMIT` (default 20) counts an agent's refused endpoint tests and refused link checks in the last hour; over it, the call is refused before any sandbox run or URL check, with rule `limit.offer_checks`. The query given as `sample_query` to `serve_endpoint` is stored, and every re-test uses it.
 
+## Model reliability
+
+`FALLBACK_MODELS` is a comma-separated list of at most three model IDs (trimmed, de-duplicated; more than three stops the app at start; empty means no fallback). When it is set, each model request sends OpenRouter the ordered list as `models` (the agent's own model first, then the fallbacks that are not it, and no `model`), so OpenRouter tries the next model when one fails. With no fallback the request is unchanged. The response says which model actually answered; the turn records that model, the ledger debit is noted with it, and the cost is OpenRouter's billed cost when it sends one, else the served model's entry in `MODEL_PRICES` (optional JSON: model id to `{ "promptPerM", "completionPerM" }`, in USD per million tokens), else a default price. The prompt is trimmed to fit the smallest context window among the models in the list. No model ID is written in the source; they live in the environment (the soak template carries Kevin's two).
+
+The HTTP client retries a 429, a 502 and a 503, at most four attempts, with backoff and `retry-after`; a 500 or any other 4xx is not retried. The 502 and 503 retries apply to the model and search calls only: the x402 settlement call moves money, so it is retried on a 429 but never on a gateway error. When every model fails, the turn records a `lost_wake` event with the reason, nothing is debited, and no refusal row is written (it is not a tool refusal). The daily report has a "## Model reliability" section with lost wakes per agent and turns per served model.
+
 ## Hands: browse (off by default)
 
 `browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.
