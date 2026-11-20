@@ -276,8 +276,10 @@ describe("turn summary keeps the closing fence", () => {
     });
     const turn = turns[0] ?? "";
     expect(turn.length).toBeLessThanOrEqual(1_800);
-    const open = OPEN.exec(turn);
-    expect(open).toBeTruthy();
-    expect(turn.endsWith(`<<<END_SENSE_DATA nonce=${open?.[1]}>>>`)).toBe(true);
+    // The loop prefixes each note with "<tool>: ", so the open line is not at a line start here.
+    expect(turn).toMatch(/^see_page: <<<SENSE_DATA nonce=[0-9a-f]{12} tool=see_page threat=low>>>/);
+    const nonce = /nonce=([0-9a-f]{12})/.exec(turn)?.[1];
+    expect(turn.endsWith(`<<<END_SENSE_DATA nonce=${nonce}>>>`)).toBe(true);
+    expect(turn).toContain("[truncated]");
   });
 });
