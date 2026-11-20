@@ -117,7 +117,8 @@ describe("stage 1 demo", () => {
         expect(table).toContain(tool.record);
       }
       expect(table).toContain("mainnet locked");
-      expect(table).toContain("no separate evidence table");
+      expect(table).toContain("Each sense call also writes one evidence row");
+      expect(table).not.toContain("no separate evidence table");
     } finally {
       fetchSpy.mockRestore();
     }
