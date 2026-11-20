@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS evidence (
   threat_level TEXT NOT NULL,
   flags TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
-  quarantine_path TEXT
+  quarantine_path TEXT,
+  raw_path TEXT
 );
 
 CREATE INDEX IF NOT EXISTS evidence_agent ON evidence(agent_id, id);
@@ -132,15 +133,18 @@ export function openDatabase(file: string): DatabaseSync {
   db.exec(SCHEMA);
   ensureNonceStatus(db);
   ensurePayerClass(db);
-  ensureEvidenceQuarantinePath(db);
+  ensureEvidenceColumns(db);
   return db;
 }
 
-/** Add quarantine_path to an evidence table made before the quarantine moved out of the workspace. */
-function ensureEvidenceQuarantinePath(db: DatabaseSync): void {
+/**
+ * Add the nullable evidence columns an older table lacks: quarantine_path (BO-2.1-fix) and raw_path (BO-2.1c).
+ * Safe to run on every open.
+ */
+function ensureEvidenceColumns(db: DatabaseSync): void {
   const cols = db.prepare("PRAGMA table_info(evidence)").all() as unknown as { name: string }[];
-  if (!cols.some((col) => col.name === "quarantine_path")) {
-    db.exec("ALTER TABLE evidence ADD COLUMN quarantine_path TEXT");
+  for (const name of ["quarantine_path", "raw_path"]) {
+    if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE evidence ADD COLUMN ${name} TEXT`);
   }
 }
 

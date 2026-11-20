@@ -72,9 +72,8 @@ export async function executeLocalTool(input: {
       return looked.map((entry) => entry.address);
     });
     if (!review.allowed) return review.reason;
-    const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(15_000) });
-    const text = await response.text();
-    return `HTTP ${response.status}\n${text.slice(0, 12_000)}`;
+    // The orchestrator fetches the page itself, so its text passes the tripwires and is recorded (BO-2.1c).
+    return "This tool is handled by the orchestrator.";
   }
   if (input.call.name === "read_file" || input.call.name === "write_file") {
     const requested = String(args.path ?? "");
@@ -90,6 +89,7 @@ export async function executeLocalTool(input: {
     const content = String(args.content ?? "");
     const review = reviewText(content);
     if (!review.allowed) return review.reason;
+    if (!canWriteInside(input.workspace, target)) return "Paths must stay inside the workspace.";
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content);
     return `Wrote ${path.relative(input.workspace, target)} (${content.length} bytes).`;
@@ -156,6 +156,44 @@ function readWorkspaceFile(workspace: string, target: string): string {
   const text = fs.readFileSync(real, "utf8").slice(0, 12_000);
   const inEvidence = path.relative(realRoot, real).split(path.sep)[0] === "evidence";
   return inEvidence ? guardSenseText("read_file", text).output : text;
+}
+
+/**
+ * May write_file create or overwrite target? The target itself must not be a symlink (whatever it points at), and the
+ * real path of its nearest existing ancestor must be inside the real workspace, so neither a file link nor a
+ * directory link can carry a write outside. Nothing is created until both checks pass. A dangling link counts as an
+ * existing entry and is refused because its real path cannot be resolved.
+ */
+function canWriteInside(workspace: string, target: string): boolean {
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(workspace);
+  } catch {
+    return false;
+  }
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return false;
+  } catch {
+    // Nothing is at the target yet.
+  }
+  let ancestor = path.dirname(target);
+  for (;;) {
+    try {
+      fs.lstatSync(ancestor);
+      break;
+    } catch {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return false;
+      ancestor = parent;
+    }
+  }
+  let realAncestor: string;
+  try {
+    realAncestor = fs.realpathSync(ancestor);
+  } catch {
+    return false;
+  }
+  return realAncestor === realRoot || realAncestor.startsWith(`${realRoot}${path.sep}`);
 }
 
 function resolveWorkspace(workspace: string, requested: string): string | null {
