@@ -1529,8 +1529,11 @@ export class Swarm {
     }
     lines.push("## Notable actions");
     if (notable.length === 0) lines.push("- None in the last day.");
+    // A swarm wallet is shown by its agent's name: the address is random per agent and says less than the name does.
+    const swarmWallets = agents.map((agent) => ({ address: agent.walletAddress, name: sanitizeSenseText(agent.name) }));
+    const shown = (text: string) => swarmWallets.reduce((out, wallet) => out.split(wallet.address).join(`${wallet.name}'s wallet`), text);
     for (const event of notable.slice(-40)) {
-      lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${event.message}`);
+      lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${shown(event.message)}`);
     }
     lines.push("");
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));

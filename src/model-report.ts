@@ -21,7 +21,7 @@ export function modelReliabilityLines(
     lines.push(...assignedAndServed(db, since, agents));
     return lines;
   }
-  lines.push("Last 24 hours. Lost wakes have their own section.", "", "### Turns per served model");
+  lines.push("Last 24 hours.", "", "### Turns per served model");
   for (const row of served) lines.push(`- ${sanitizeSenseText(row.model)}: ${row.n}`);
   lines.push("");
   lines.push(...assignedAndServed(db, since, agents));
