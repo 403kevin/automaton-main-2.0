@@ -127,6 +127,17 @@ async function fixtureDay() {
   fs.writeFileSync(path.join(workspace, "job", "handler.js"), "process.stdout.write('hi');\n");
   const run = (id: string, name: string, args: Record<string, unknown>) => box.swarm.handleTool(id, call(name, args));
 
+  // Predictions come first; what they are scored against happens a minute later. One of them is meant to miss.
+  for (const [metric, op, value] of [
+    ["income_outside_units", ">=", 1],
+    ["income_sibling_units", ">=", 1_000_000],
+    ["test_deliveries_ok", ">=", 1],
+    ["sense_results", ">=", 2],
+  ] as const) {
+    await run(w, "predict", { metric, op, value, deadline_hours: 1 });
+  }
+  box.clock.advance(60_000);
+
   await run(w, "see_page", { url: PAGE });
   await run(w, "web_search", { query: "tide tables" });
   await run(w, "see_page", { url: TRAP });
@@ -140,14 +151,6 @@ async function fixtureDay() {
   await run(w, "serve_endpoint", { name: "echo", price_usd: "0.01", handler_dir: "job" });
   verifier.queue.push(handlerResult("error"));
   await run(w, "serve_endpoint", { name: "broken", price_usd: "0.01", handler_dir: "job" });
-  for (const [metric, op, value] of [
-    ["income_outside_units", ">=", 1],
-    ["income_sibling_units", ">=", 1000],
-    ["test_deliveries_ok", ">=", 1],
-    ["sense_results", ">=", 2],
-  ] as const) {
-    await run(w, "predict", { metric, op, value, deadline_hours: 1 });
-  }
   await box.swarm.simulateTransfer(w, OUTSIDE, parseUsd("0.50"), "fx-outside");
   await box.swarm.simulateTransfer(w, mite.value.address, parseUsd("0.20"), "fx-sibling");
 

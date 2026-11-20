@@ -98,7 +98,7 @@ function observed(ctx: ReportContext, agentId: string | null): Observed {
 function coverage(seen: Observed): { text: string; percent: number | null } {
   if (seen.paidSense === 0) return { text: "n/a (no paid sense calls)", percent: null };
   const share = Math.min(100, Math.round((100 * seen.evidence) / seen.paidSense));
-  return { text: `${share}% (${seen.evidence} evidence rows for ${seen.paidSense} paid sense calls)`, percent: share };
+  return { text: `${share}% (evidence rows ${seen.evidence}, paid sense calls ${seen.paidSense})`, percent: share };
 }
 
 function lostWakeCount(ctx: ReportContext, agentId: string | null): number {
@@ -362,14 +362,15 @@ export function lostWakesLines(ctx: ReportContext): string[] {
   return lines;
 }
 
+/** A tripwire hit is a scan that flagged the text: an evidence row with flags, or a claim scanned above low (low is the clean baseline). */
 export function breachesLines(ctx: ReportContext): string[] {
   const lines = ["## Breaches", ""];
   const hits = new Map<string, number>();
   const add = (rows: Array<{ agent_id: string; n: number }>) => {
     for (const row of rows) hits.set(row.agent_id, (hits.get(row.agent_id) ?? 0) + row.n);
   };
-  add(ctx.db.prepare("SELECT agent_id, COUNT(*) AS n FROM evidence WHERE threat_level != 'none' AND created_at >= ? GROUP BY agent_id").all(ctx.since) as unknown as Array<{ agent_id: string; n: number }>);
-  add(ctx.db.prepare("SELECT agent_id, COUNT(*) AS n FROM claims WHERE threat_level != 'none' AND created_at >= ? GROUP BY agent_id").all(ctx.since) as unknown as Array<{ agent_id: string; n: number }>);
+  add(ctx.db.prepare("SELECT agent_id, COUNT(*) AS n FROM evidence WHERE flags != '' AND created_at >= ? GROUP BY agent_id").all(ctx.since) as unknown as Array<{ agent_id: string; n: number }>);
+  add(ctx.db.prepare("SELECT agent_id, COUNT(*) AS n FROM claims WHERE threat_level NOT IN ('none', 'low') AND created_at >= ? GROUP BY agent_id").all(ctx.since) as unknown as Array<{ agent_id: string; n: number }>);
   const events = ctx.db
     .prepare("SELECT agent_id, kind, COUNT(*) AS n FROM events WHERE kind IN ('breach', 'ledger_drift') AND created_at >= ? GROUP BY agent_id, kind")
     .all(ctx.since) as unknown as Array<{ agent_id: string | null; kind: string; n: number }>;
