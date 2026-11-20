@@ -307,7 +307,7 @@ describe("facts table", () => {
     const box = await rig();
     const topup = facts(box);
     expect(topup).toHaveLength(1);
-    expect(topup[0]).toMatchObject({ kind: "credit", subject: "owner_topup", value: `units=${parseUsd("1")} payer_class=none` });
+    expect(topup[0]).toMatchObject({ kind: "credit", subject: "owner_topup", value: `units=${parseUsd("1")} payer_class=owner` });
     expect(topup[0]?.source).toMatch(/^ledger:led/);
     const income = box.swarm.creditIncome(box.id, parseUsd("0.5"), "0xtxone", "0x2222222222222222222222222222222222222222");
     expect(income.ok).toBe(true);

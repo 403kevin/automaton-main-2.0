@@ -89,6 +89,10 @@ CREATE TABLE IF NOT EXISTS endpoints (
   price_units INTEGER NOT NULL,
   snapshot_hash TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
+  status TEXT DEFAULT 'live',
+  last_test_output TEXT,
+  last_test_at INTEGER,
+  test_failures INTEGER DEFAULT 0,
   PRIMARY KEY (agent_id, name)
 );
 
@@ -158,7 +162,25 @@ export function openDatabase(file: string): DatabaseSync {
   ensureNonceStatus(db);
   ensurePayerClass(db);
   ensureEvidenceColumns(db);
+  ensureEndpointColumns(db);
   return db;
+}
+
+/**
+ * Add the nullable test columns an older endpoints table lacks (BO-2.2). A null status reads as live and a null
+ * failure count as 0, so rows made before this keep working. Safe to run on every open.
+ */
+function ensureEndpointColumns(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(endpoints)").all() as unknown as { name: string }[];
+  const wanted: Array<[string, string]> = [
+    ["status", "TEXT DEFAULT 'live'"],
+    ["last_test_output", "TEXT"],
+    ["last_test_at", "INTEGER"],
+    ["test_failures", "INTEGER DEFAULT 0"],
+  ];
+  for (const [name, type] of wanted) {
+    if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE endpoints ADD COLUMN ${name} ${type}`);
+  }
 }
 
 /**
@@ -348,24 +370,45 @@ export function countPages(db: DatabaseSync, agentId: string): number {
   return row.n;
 }
 
-export function listEndpoints(db: DatabaseSync, agentId: string): ServedEndpoint[] {
-  const rows = db
-    .prepare("SELECT name, price_units, snapshot_hash, updated_at FROM endpoints WHERE agent_id = ? ORDER BY name ASC")
-    .all(agentId) as unknown as { name: string; price_units: number; snapshot_hash: string; updated_at: number }[];
-  return rows.map((row) => ({
+interface EndpointRow {
+  name: string;
+  price_units: number;
+  snapshot_hash: string;
+  updated_at: number;
+  status: string | null;
+  last_test_output: string | null;
+  last_test_at: number | null;
+  test_failures: number | null;
+}
+
+const ENDPOINT_COLUMNS =
+  "name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures";
+
+function endpointFromRow(row: EndpointRow): ServedEndpoint {
+  return {
     name: row.name,
     priceUnits: row.price_units,
     snapshotHash: row.snapshot_hash,
     updatedAt: row.updated_at,
-  }));
+    status: row.status === "unpublished" ? "unpublished" : "live",
+    lastTestOutput: row.last_test_output,
+    lastTestAt: row.last_test_at,
+    testFailures: row.test_failures ?? 0,
+  };
+}
+
+export function listEndpoints(db: DatabaseSync, agentId: string): ServedEndpoint[] {
+  const rows = db
+    .prepare(`SELECT ${ENDPOINT_COLUMNS} FROM endpoints WHERE agent_id = ? ORDER BY name ASC`)
+    .all(agentId) as unknown as EndpointRow[];
+  return rows.map(endpointFromRow);
 }
 
 export function getEndpoint(db: DatabaseSync, agentId: string, name: string): ServedEndpoint | undefined {
   const row = db
-    .prepare("SELECT name, price_units, snapshot_hash, updated_at FROM endpoints WHERE agent_id = ? AND name = ?")
-    .get(agentId, name) as { name: string; price_units: number; snapshot_hash: string; updated_at: number } | undefined;
-  if (!row) return undefined;
-  return { name: row.name, priceUnits: row.price_units, snapshotHash: row.snapshot_hash, updatedAt: row.updated_at };
+    .prepare(`SELECT ${ENDPOINT_COLUMNS} FROM endpoints WHERE agent_id = ? AND name = ?`)
+    .get(agentId, name) as EndpointRow | undefined;
+  return row ? endpointFromRow(row) : undefined;
 }
 
 export function countEndpoints(db: DatabaseSync, agentId: string): number {

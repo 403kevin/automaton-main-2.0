@@ -103,7 +103,7 @@ export function insertClaim(db: DatabaseSync, agentId: string, draft: ClaimDraft
 /** Only the runtime calls this. There is no tool for it. */
 export function insertFact(
   db: DatabaseSync,
-  fact: { agentId: string; kind: "sense" | "credit"; subject: string; value: string; source: string; now: number },
+  fact: { agentId: string; kind: "sense" | "credit" | "test_delivery"; subject: string; value: string; source: string; now: number },
 ): void {
   db.prepare("INSERT INTO facts (agent_id, kind, subject, value, source, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(
     fact.agentId,

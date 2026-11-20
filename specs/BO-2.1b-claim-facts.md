@@ -1,6 +1,7 @@
 # BO-2.1b — `claim` tool, `claims` + `facts` tables, `web_search` through `senseCall`
 
 Spec for ORDER BO-2.1b (section 25 of `AUTOMATON_COLLAB_FOR_GROK.md`). It finishes plan row BO-2.1 ("Evidence ledger + `claim` + facts") after [BO-2.1](BO-2.1-tripwires.md) (evidence rows and tripwires) and [BO-2.1c](BO-2.1c-raw-out.md) (raw files out of the workspace).
+Follow-up: [BO-2.2](BO-2.2-no-phantom-products.md) adds `test_delivery` facts, labels the `replication_in` and `owner_topup` credit facts (`payer_class=sibling` / `owner`), and fixes `replication_in` so that it writes a fact at all.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 Sources: plan lesson 2 (`claim(text, evidence_ids[])` is marked verified only if the rows exist and belong to that agent), the acceptance tests (a claim with someone else's evidence id is rejected; a claim with no evidence id is stored as unverified), and the memory design (a runtime-written `facts` table that is read-only to the agent).
 

@@ -183,6 +183,12 @@ export async function runStageDemo(options: StageDemoOptions = {}): Promise<Stag
 
     db = openDatabase(path.join(dir, "automaton.sqlite"));
     const swarm = new Swarm(db, config, new ManualClock(1_700_000_000_000), new DryRunChain(db), new FakeRuntime(), new MockSearch(), undefined, recorder);
+    // Mock mode has no Docker. The offer gate fails closed, so the demo installs a stand-in that reports a working handler.
+    swarm.setOfferVerifier({
+      async test() {
+        return { ok: true, code: "ok", output: "demo handler output", exitCode: 0, durationMs: 1, bytesOut: 19, publicReason: "", killed: false };
+      },
+    });
     const created = await swarm.createAgent({ name: "probe" });
     if (!created.ok) {
       problems.push(created.error);

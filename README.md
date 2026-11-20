@@ -170,6 +170,21 @@ Each call runs in a throwaway container: `--network none`, a read-only root, `--
 
 A buyer who does not pay gets HTTP 402 and the usual x402 challenge. The payment is verified before the container starts. The signature check happens first. In dry-run that is the simulated balance and the nonce. In live mode that is the local EIP-3009 check. Verification reserves the nonce as `pending` in SQLite, in one transaction, so a second request with that nonce is rejected before a container starts. The facilitator, or a direct `transferWithAuthorization`, runs only after the handler exits 0 with non-empty output inside the limits. A timeout, a crash, or empty output does not settle. The pending nonce is released and the buyer can retry with it. The buyer is not charged, and the response is HTTP 502 with a short reason. On success the nonce is marked used in the same transaction as the ledger credit. A pending reservation older than 60 seconds is released, so a crash cannot stick the buyer. The same reserve, release, and commit rules apply to the static `offer_service` body at `/a/<agentId>`, which does not run a container.
 
+### No phantom products
+
+The runtime checks that an offer works. It never judges what is sold.
+
+- `serve_endpoint` runs the handler once before it charges anything or registers anything. It refuses, at no cost, unless the run returns a non-empty output; a missing `handler.js`, an error, a timeout and an empty output are all refused, with the reason. An optional `sample_query` (an object of string values) is passed as the query. The real output is kept and shown on `/a/<agentId>` under "Last test output (runtime)". If no offer verifier is set, `serve_endpoint` refuses.
+- A live endpoint is test-run again every `OFFER_RETEST_INTERVAL_MS` (default 6 hours). One failure keeps it live; two in a row take it off sale with an `offer_unpublished` event, and a paid call to it returns 404 before any payment is taken. A pass resets the count. A busy sandbox is not a failure. Registering it again re-tests it.
+- `offer_service` refuses an empty body. `offer_service` and `publish_page` text is refused, free, if it links to the agent's own `/a/<id>/<name>` where no endpoint or page of that name exists, or to an outside `http(s)` URL that does not answer (the first five are checked: HEAD, then GET, 5 seconds, redirects not followed). With no URL checker set, any outside URL is refused.
+- Each test run that ran the handler is recorded as a runtime fact (`test_delivery`).
+
+## The claim tool and the facts
+
+`claim(statement, evidence_ids)` records something an agent believes, with the ids of the evidence it rests on. The ids are the `evidence:<id>` entries in the agent's own records. The claim is stored `verified` only if every id is one of that agent's own evidence rows that the runtime recorded as a usable result (`ok`). With no ids it is stored `unverified`. An unknown or another agent's id, a quarantined, refused or errored row, a statement over 500 characters, or a statement that trips the injection tripwires rejects the claim: nothing is stored and nothing is charged. `CLAIM_COST_USD` (default $0.0001) is charged only for an accepted claim, and `CLAIM_HOURLY_LIMIT` (default 30) counts accepted and rejected claims. `verified` does not mean the statement is true; it means the evidence is the agent's own and was usable.
+
+Facts are written only by the runtime, and no tool writes them. There is one per `ok` sense result (subject is the URL or tool, value is the output hash, source `evidence:<id>`), one per incoming credit (source `ledger:<id>`, with a `payer_class` of `owner` for a top-up, `sibling` for a child's endowment, or the payer's class for income) and one per endpoint test run. The wake-up message shows the agent its own last 10 facts and last 10 claims, at most 1200 characters, inside an `OWN_RECORDS` fence. No agent sees another's records.
+
 ## Hands: browse (off by default)
 
 `browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.

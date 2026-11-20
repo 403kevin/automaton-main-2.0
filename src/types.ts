@@ -70,11 +70,19 @@ export interface PublishedPage {
   updatedAt: number;
 }
 
+export type EndpointStatus = "live" | "unpublished";
+
 export interface ServedEndpoint {
   name: string;
   priceUnits: number;
   snapshotHash: string;
   updatedAt: number;
+  status: EndpointStatus;
+  /** The runtime's own recording of the last test run (never agent-written text). */
+  lastTestOutput: string | null;
+  lastTestAt: number | null;
+  /** Consecutive failed re-tests. */
+  testFailures: number;
 }
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
