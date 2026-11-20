@@ -146,12 +146,29 @@ export function renderPublishedPage(agentId: string, slug: string, markdown: str
   });
 }
 
-export function renderPageIndex(agentId: string, slugs: string[]): string {
+export interface ListedEndpoint {
+  name: string;
+  price: string;
+  /** The runtime's recording of the last test run. Shown escaped, labelled as the runtime's. */
+  lastTestOutput: string;
+}
+
+export function renderPageIndex(agentId: string, slugs: string[], endpoints: ListedEndpoint[] = []): string {
   const items = slugs.filter((slug) => isPublicSlug(slug));
-  const body = items.length
+  const pages = items.length
     ? `<ul>${items.map((slug) => `<li><a href="/a/${agentId}/${slug}">${escapeHtml(slug)}</a></li>`).join("")}</ul>`
     : "<p>No pages yet.</p>";
-  return renderAgentPage({ agentId, title: `Pages by ${agentId}`, bodyHtml: body });
+  const listed = endpoints.filter((endpoint) => isPublicSlug(endpoint.name));
+  const paid = listed.length
+    ? `<h2>Paid endpoints</h2><ul>${listed
+        .map(
+          (endpoint) =>
+            `<li><a href="/a/${agentId}/${endpoint.name}">${escapeHtml(endpoint.name)}</a> ${escapeHtml(endpoint.price)}` +
+            `<p><strong>Last test output (runtime)</strong></p><pre>${escapeHtml(endpoint.lastTestOutput)}</pre></li>`,
+        )
+        .join("")}</ul>`
+    : "";
+  return renderAgentPage({ agentId, title: `Pages by ${agentId}`, bodyHtml: `${pages}${paid}` });
 }
 
 function isBlockStart(line: string): boolean {

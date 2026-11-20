@@ -20,12 +20,13 @@ import {
   kvGet,
   kvSet,
   listAgents,
+  listEndpoints as listEndpointRows,
   listPages as listPageRows,
   markNonceUsed,
   releasePaymentNonce,
   reservePaymentNonce,
 } from "./db.js";
-import { handlerSnapshotRoot, MAX_ENDPOINTS_PER_AGENT, snapshotHandlerDir } from "./handlers.js";
+import { handlerSnapshotRoot, MAX_ENDPOINTS_PER_AGENT, snapshotHandlerDir, type HandlerRunResult } from "./handlers.js";
 import { isPublicSlug, MAX_PAGE_BYTES, MAX_PAGES_PER_AGENT } from "./pages.js";
 import { DEFAULT_GENESIS } from "./genesis.js";
 import { newId, newToken } from "./ids.js";
@@ -38,9 +39,10 @@ import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesCli
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
-import { guardSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
+import { guardSenseText, sanitizeSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
+import { checkOfferLinks, type OfferVerifier, type UrlChecker } from "./verify-offer.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
-import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
+import type { AgentRecord, AgentSnapshot, LedgerKind, Result, ServedEndpoint, SpendCategory, ToolCall } from "./types.js";
 import { rateLimitCounts } from "./http.js";
 import { createWallet, decryptWalletKey } from "./wallet.js";
 import {
@@ -94,6 +96,11 @@ const FETCH_URL_MAX_BYTES = 100_000;
 const FETCH_URL_MAX_CHARS = 12_000;
 const FETCH_URL_TIMEOUT_MS = 15_000;
 
+/** The most characters of a handler's test output kept as the preview. */
+const OFFER_PREVIEW_MAX_CHARS = 2_000;
+/** Consecutive failed re-tests that take a live endpoint off sale. */
+const OFFER_UNPUBLISH_AFTER_FAILURES = 2;
+
 /** Ledger kinds that are money coming in from outside the agent. Each posted credit of these kinds writes one fact. */
 const CREDIT_FACT_KINDS: ReadonlySet<string> = new Set(["owner_topup", "onchain_income", "x402_in", "replication_in"]);
 
@@ -118,6 +125,8 @@ export class Swarm {
   private maintaining = false;
   private scheduler: RentScheduler | null = null;
   private councilRunner?: (agentId: string, question: string) => Promise<Result<string>>;
+  private offerVerifier?: OfferVerifier;
+  private urlChecker?: UrlChecker;
   private settler: PaymentSettler | null = null;
   private reportTimer: ReturnType<typeof setInterval> | null = null;
   private readonly sensesClient: SensesClient;
@@ -150,6 +159,16 @@ export class Swarm {
 
   setCouncil(runner: (agentId: string, question: string) => Promise<Result<string>>): void {
     this.councilRunner = runner;
+  }
+
+  /** The offer gate fails closed: with no verifier set, serve_endpoint refuses. */
+  setOfferVerifier(verifier: OfferVerifier | undefined): void {
+    this.offerVerifier = verifier;
+  }
+
+  /** With no checker set, text that contains an outside URL is refused. */
+  setUrlChecker(checker: UrlChecker | undefined): void {
+    this.urlChecker = checker;
   }
 
   setSettler(settler: PaymentSettler): void {
@@ -205,6 +224,7 @@ export class Swarm {
         kvSet(this.db, "last_rent_at", String(now));
       }
       await this.enforceDeaths(now);
+      await this.retestEndpoints(this.clock.now());
     } finally {
       this.maintaining = false;
     }
@@ -497,6 +517,15 @@ export class Swarm {
       const body = String(args.body ?? "");
       const review = reviewText(`${description}\n${body}`);
       if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (body.trim() === "") {
+        this.event(agentId, "offer_service", "outcome=refused cost=0 body is empty");
+        return { ok: false, reason: "An offer needs a body: the text a buyer receives." };
+      }
+      const linkProblem = await this.linkProblem(agentId, `${description}\n${body}`);
+      if (linkProblem) {
+        this.event(agentId, "offer_service", `outcome=refused cost=0 ${linkProblem}`);
+        return { ok: false, reason: linkProblem };
+      }
       let price = 0;
       try {
         price = (await import("./money.js")).parseUsd(String(args.priceUsd ?? ""));
@@ -646,6 +675,10 @@ export class Swarm {
 
   endpoint(agentId: string, name: string) {
     return getEndpoint(this.db, agentId, name);
+  }
+
+  listEndpoints(agentId: string): ServedEndpoint[] {
+    return listEndpointRows(this.db, agentId);
   }
 
   private async verifyDryPayment(seller: AgentRecord, header: string, priceUnits: number): Promise<Result<HeldPayment>> {
@@ -826,6 +859,11 @@ export class Swarm {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
       return { ok: false, reason: `Page cap is ${MAX_PAGES_PER_AGENT}.` };
     }
+    const linkProblem = await this.linkProblem(agentId, markdown);
+    if (linkProblem) {
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0 ${linkProblem}`);
+      return { ok: false, reason: linkProblem };
+    }
     const cost = this.config.publishPagePriceUnits;
     if (cost > 0) {
       const charged = this.debit(agentId, cost, "tool", `tool:${call.id}`, "publish_page");
@@ -889,6 +927,11 @@ export class Swarm {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
       return { ok: false, reason: `Endpoint cap is ${MAX_ENDPOINTS_PER_AGENT}.` };
     }
+    const sample = readSampleQuery(call.arguments?.sample_query);
+    if (!sample.ok) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
+      return { ok: false, reason: sample.error };
+    }
     const snap = snapshotHandlerDir({
       workspace: agent.workspace,
       handlerDir,
@@ -897,6 +940,12 @@ export class Swarm {
     if (!snap.ok) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
       return { ok: false, reason: snap.error };
+    }
+    // The gate: run the handler once before anything is charged or registered. A refusal here is free.
+    const tested = await this.runOfferTest(agentId, name, snap.hash, sample.query);
+    if (!tested.ok) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0 test=${tested.code}`);
+      return { ok: false, reason: tested.reason };
     }
     const cost = this.config.serveEndpointPriceUnits;
     if (cost > 0) {
@@ -907,11 +956,12 @@ export class Swarm {
     try {
       this.db
         .prepare(
-          `INSERT INTO endpoints (agent_id, name, price_units, snapshot_hash, updated_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(agent_id, name) DO UPDATE SET price_units = excluded.price_units, snapshot_hash = excluded.snapshot_hash, updated_at = excluded.updated_at`,
+          `INSERT INTO endpoints (agent_id, name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures)
+           VALUES (?, ?, ?, ?, ?, 'live', ?, ?, 0)
+           ON CONFLICT(agent_id, name) DO UPDATE SET price_units = excluded.price_units, snapshot_hash = excluded.snapshot_hash, updated_at = excluded.updated_at,
+             status = 'live', last_test_output = excluded.last_test_output, last_test_at = excluded.last_test_at, test_failures = 0`,
         )
-        .run(agentId, name, price, snap.hash, this.clock.now());
+        .run(agentId, name, price, snap.hash, this.clock.now(), tested.preview, this.clock.now());
     } catch (error) {
       this.refundTool(agentId, cost, `refund:serve:${call.id}`, "serve_endpoint refund");
       const reason = error instanceof Error ? error.message : "Could not register the endpoint.";
@@ -923,6 +973,98 @@ export class Swarm {
       handled: true,
       output: `Registered /a/${agentId}/${name} at ${formatUsd(price)}. Snapshot ${snap.hash.slice(0, 12)}.`,
     };
+  }
+
+  /** A reason to refuse this text (a dead outside URL, or a link to the agent's own missing page), or null. */
+  private async linkProblem(agentId: string, text: string): Promise<string | null> {
+    const checked = await checkOfferLinks({
+      text,
+      agentId,
+      nameExists: (name) => Boolean(getEndpoint(this.db, agentId, name) ?? getPage(this.db, agentId, name)),
+      checker: this.urlChecker,
+    });
+    return checked.ok ? null : checked.reason;
+  }
+
+  /**
+   * Run a handler once and say whether it is fit to sell. Passing needs code ok and a non-empty output. A busy result
+   * (the sandbox was full, the handler did not run) is reported but writes no fact. Every other result writes one
+   * test_delivery fact. The preview is the real output, made safe to show: a high or critical output is kept only as
+   * the quarantine summary.
+   */
+  private async runOfferTest(
+    agentId: string,
+    name: string,
+    snapshotHash: string,
+    query: Record<string, string>,
+  ): Promise<{ ok: true; preview: string } | { ok: false; code: string; reason: string }> {
+    const verifier = this.offerVerifier;
+    if (!verifier) return { ok: false, code: "unconfigured", reason: "Offer verification is not configured, so nothing can be published." };
+    const ran = await this.runHandlerTest(verifier, agentId, name, snapshotHash, query);
+    if (!ran) return { ok: false, code: "busy", reason: "The handler test could not run (the sandbox is busy). Try again shortly." };
+    if (!ran.ok || ran.output.trim() === "") {
+      const code = ran.ok ? "empty" : ran.code;
+      const detail = ran.publicReason || "the handler produced no output";
+      return { ok: false, code, reason: `Handler test failed (${code}): ${detail}` };
+    }
+    return { ok: true, preview: offerPreview(ran.output) };
+  }
+
+  /** The test call and its fact. Returns null for busy or when the verifier itself failed: the handler did not run. */
+  private async runHandlerTest(
+    verifier: OfferVerifier,
+    agentId: string,
+    name: string,
+    snapshotHash: string,
+    query: Record<string, string>,
+  ): Promise<HandlerRunResult | null> {
+    const stdin = JSON.stringify({ method: "GET", path: `/a/${agentId}/${name}`, query, body: "" });
+    let ran: HandlerRunResult;
+    try {
+      ran = await verifier.test({ snapshotHash, stdin });
+    } catch {
+      return null;
+    }
+    if (ran.code === "busy") return null;
+    insertFact(this.db, {
+      agentId,
+      kind: "test_delivery",
+      subject: name,
+      value: `code=${ran.code} bytes=${ran.bytesOut}`,
+      source: `endpoint:${agentId}/${name}`,
+      now: this.clock.now(),
+    });
+    return ran;
+  }
+
+  /**
+   * Re-test every live endpoint of each living agent whose last test is older than OFFER_RETEST_INTERVAL_MS. A pass resets
+   * the failure count; a failure adds one; at two in a row the endpoint is unpublished with one offer_unpublished event.
+   * A busy result changes nothing, so it is tried again on the next pass. With no verifier set nothing runs.
+   */
+  private async retestEndpoints(now: number): Promise<void> {
+    const verifier = this.offerVerifier;
+    if (!verifier) return;
+    for (const agent of this.living()) {
+      for (const endpoint of listEndpointRows(this.db, agent.id)) {
+        if (endpoint.status !== "live") continue;
+        if (now - (endpoint.lastTestAt ?? endpoint.updatedAt) < this.config.offerRetestIntervalMs) continue;
+        const ran = await this.runHandlerTest(verifier, agent.id, endpoint.name, endpoint.snapshotHash, {});
+        if (!ran) continue;
+        if (ran.ok && ran.output.trim() !== "") {
+          this.db
+            .prepare("UPDATE endpoints SET test_failures = 0, last_test_output = ?, last_test_at = ? WHERE agent_id = ? AND name = ?")
+            .run(offerPreview(ran.output), now, agent.id, endpoint.name);
+          continue;
+        }
+        const failures = endpoint.testFailures + 1;
+        const off = failures >= OFFER_UNPUBLISH_AFTER_FAILURES;
+        this.db
+          .prepare("UPDATE endpoints SET test_failures = ?, last_test_at = ?, status = ? WHERE agent_id = ? AND name = ?")
+          .run(failures, now, off ? "unpublished" : "live", agent.id, endpoint.name);
+        if (off) this.event(agent.id, "offer_unpublished", `endpoint=${endpoint.name} failures=${failures} code=${ran.ok ? "empty" : ran.code}`);
+      }
+    }
   }
 
   private refundTool(agentId: string, units: number, ref: string, note: string): void {
@@ -2008,12 +2150,21 @@ export class Swarm {
         .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, 'replication', ?, ?)")
         .run(parentId, units, day, now);
       const childAfter = child.balanceUnits + units;
+      const inId = newId("led");
       this.db
         .prepare(
           "INSERT INTO ledger_entries (id, agent_id, kind, amount_units, balance_after, ref, note, created_at) VALUES (?, ?, 'replication_in', ?, ?, ?, ?, ?)",
         )
-        .run(newId("led"), childId, units, childAfter, ref, "endowment from parent", now);
+        .run(inId, childId, units, childAfter, ref, "endowment from parent", now);
       this.db.prepare("UPDATE agents SET balance_units = ? WHERE id = ?").run(childAfter, childId);
+      insertFact(this.db, {
+        agentId: childId,
+        kind: "credit",
+        subject: "replication_in",
+        value: `units=${units} payer_class=sibling`,
+        source: `ledger:${inId}`,
+        now,
+      });
       this.db.exec("COMMIT");
       return { ok: true, value: { balance: parentAfter } };
     } catch (error) {
@@ -2099,7 +2250,7 @@ export class Swarm {
           agentId: input.agentId,
           kind: "credit",
           subject: input.kind,
-          value: `units=${input.amount} payer_class=${input.payerClass ?? "none"}`,
+          value: `units=${input.amount} payer_class=${input.payerClass ?? (input.kind === "owner_topup" ? "owner" : "none")}`,
           source: `ledger:${entryId}`,
           now,
         });
@@ -2283,6 +2434,26 @@ async function readBodyCapped(response: Response, maxBytes: number): Promise<str
   }
   await reader.cancel().catch(() => undefined);
   return Buffer.concat(chunks).subarray(0, maxBytes).toString("utf8");
+}
+
+/** The optional sample_query for a test run: an object of string values, the same rules the server applies to a real call. */
+function readSampleQuery(value: unknown): { ok: true; query: Record<string, string> } | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, query: {} };
+  const bad = { ok: false as const, error: "sample_query must be an object whose values are strings (keys of 1-64 letters, numbers, _ or -; values up to 2000 characters)." };
+  if (typeof value !== "object" || Array.isArray(value)) return bad;
+  const query: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(key) || typeof entry !== "string" || entry.length > 2_000) return bad;
+    query[key] = entry;
+  }
+  return { ok: true, query };
+}
+
+/** What a buyer is shown of a test run: the real output, cut to 2000 characters, or only the quarantine summary if it looks hostile. */
+function offerPreview(output: string): string {
+  const cut = output.slice(0, OFFER_PREVIEW_MAX_CHARS);
+  const guarded = guardSenseText("serve_endpoint", cut);
+  return (guarded.quarantined ? guarded.output : sanitizeSenseText(cut)).slice(0, OFFER_PREVIEW_MAX_CHARS);
 }
 
 function sha256(value: string): string {

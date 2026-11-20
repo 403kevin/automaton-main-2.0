@@ -9,6 +9,19 @@ import { MockSearch, type SearchProvider } from "../src/search.js";
 import type { SensesClient } from "../src/senses-client.js";
 import { FakeRuntime } from "../src/runtime.js";
 import { Swarm } from "../src/swarm.js";
+import type { OfferVerifier, UrlChecker } from "../src/verify-offer.js";
+
+const permissiveVerifier: OfferVerifier = {
+  async test() {
+    return { ok: true, code: "ok", output: "ok", exitCode: 0, durationMs: 1, bytesOut: 2, publicReason: "", killed: false };
+  },
+};
+
+const permissiveUrlChecker: UrlChecker = {
+  async check() {
+    return { ok: true };
+  },
+};
 
 export function harness(
   overrides: Record<string, string> = {},
@@ -50,6 +63,10 @@ export function harness(
   const runtime = new FakeRuntime();
   const provider = search ?? new MockSearch();
   const swarm = new Swarm(db, config, clock, book, runtime, provider, undefined, senses);
+  // The offer gate fails closed, so a test harness installs permissive stand-ins (no Docker, no network). A test that
+  // exercises the gate replaces them with its own fakes.
+  swarm.setOfferVerifier(permissiveVerifier);
+  swarm.setUrlChecker(permissiveUrlChecker);
   return {
     dir,
     config,

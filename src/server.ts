@@ -4,7 +4,7 @@ import type { AppConfig } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import { HandlerSandbox, handlerHttpStatus, handlerSnapshotRoot } from "./handlers.js";
 import type { DirectHost } from "./host.js";
-import { parseUsd } from "./money.js";
+import { formatUsd, parseUsd } from "./money.js";
 import { classifyAgentRoute, renderPageIndex, renderPublishedPage } from "./pages.js";
 import { type BrowseLlmProxy, startInternalLlmServer } from "./llm-proxy.js";
 import { caipNetwork, encodeHeaderValue, paymentRequirements, X402_HEADERS } from "./x402.js";
@@ -228,7 +228,11 @@ function servePageIndex(res: ServerResponse, swarm: Swarm, agentId: string): voi
     return;
   }
   const slugs = swarm.listPages(agentId).map((page) => page.slug);
-  sendHtml(res, renderPageIndex(agentId, slugs));
+  const endpoints = swarm
+    .listEndpoints(agentId)
+    .filter((endpoint) => endpoint.status === "live" && endpoint.lastTestOutput)
+    .map((endpoint) => ({ name: endpoint.name, price: formatUsd(endpoint.priceUnits), lastTestOutput: endpoint.lastTestOutput ?? "" }));
+  sendHtml(res, renderPageIndex(agentId, slugs, endpoints));
 }
 
 async function serveNamed(
@@ -252,7 +256,10 @@ async function serveNamed(
   }
   const endpoint = swarm.endpoint(agentId, name);
   if (endpoint) {
-    if (status === "archived") return send(res, 404, { error: "No paid endpoint is offered here." });
+    // An endpoint that failed its re-tests is off sale: 404 before any payment challenge or payment check.
+    if (status === "archived" || endpoint.status === "unpublished") {
+      return send(res, 404, { error: "No paid endpoint is offered here." });
+    }
     if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
     return serveEndpoint(req, res, config, swarm, handlers, agentId, name, walletAddress, endpoint);
   }

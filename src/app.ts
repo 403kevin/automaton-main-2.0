@@ -15,6 +15,7 @@ import { LiveSettler } from "./settle.js";
 import { Swarm } from "./swarm.js";
 import { HandlerSandbox, handlerSnapshotRoot } from "./handlers.js";
 import { createRuntime, detectDockerBinary, FakeRuntime } from "./runtime.js";
+import { HttpUrlChecker, SandboxOfferVerifier } from "./verify-offer.js";
 
 export interface AppContext {
   config: AppConfig;
@@ -82,5 +83,8 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
     timeoutMs: config.handlerTimeoutMs,
     queueTimeoutMs: config.handlerQueueTimeoutMs,
   });
+  // The offer gate: a paid endpoint is test-run in the same sandbox that serves it, and outside URLs in offer text are checked.
+  swarm.setOfferVerifier(new SandboxOfferVerifier(handlers));
+  swarm.setUrlChecker(new HttpUrlChecker({ denyHosts: config.denyHosts }));
   return { config, swarm, host, clock, handlers, llmProxy };
 }
