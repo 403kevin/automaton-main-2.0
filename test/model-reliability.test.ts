@@ -384,10 +384,13 @@ describe("the report and the migration", () => {
     }
     box.swarm.recordTurn(a.value.id, "Inference skipped: down");
     const { markdown } = box.swarm.writeDailyReport();
+    // BO-2.5 moved lost wakes out of "Model reliability" into their own "Lost wakes" section, so they are read from there.
+    const lost = markdown.slice(markdown.indexOf("## Lost wakes"), markdown.indexOf("## Model reliability"));
+    expect(lost).toContain("- maker: 1 of 3 turns");
+    expect(lost).not.toContain("- other:");
     const section = markdown.slice(markdown.indexOf("## Model reliability"));
     expect(markdown).toContain("## Model reliability");
-    expect(section).toContain("- maker: 1");
-    expect(section).not.toContain("- other: 1");
+    expect(section).not.toContain("- maker: 1 of");
     expect(section).toContain("- fallback/model-a: 2");
     expect(section).toContain("- fallback/model-b: 1");
     box.clock.advance(25 * HOUR);

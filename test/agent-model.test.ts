@@ -443,12 +443,11 @@ describe("the soak template and profile", () => {
     });
   }
 
-  it("keeps the SOAK_AGENT_MODELS slot for Kevin commented out, and the template still parses", () => {
-    const text = fs.readFileSync("config/soak.env.template", "utf8");
-    expect(text).toMatch(/^# SOAK_AGENT_MODELS=<<KEVIN: [^\n]*mistralai\/mistral-nemo[^\n]*>>$/m);
-    expect(text).not.toMatch(/^SOAK_AGENT_MODELS=/m);
+  // BO-2.5: Kevin filled the SOAK_AGENT_MODELS slot (wick on mistral-nemo, 2026-11-20 1:32 PM CST), so the slot is no longer
+  // expected to be commented out; test/report-v2.test.ts checks the filled value in both profiles.
+  it("still parses with SOAK_AGENT_MODELS filled in", () => {
     const env = loadEnvFile("config/soak.env.template");
-    expect(env.SOAK_AGENT_MODELS).toBeUndefined();
+    expect(env.SOAK_AGENT_MODELS).toBeDefined();
     expect(() => loadConfig({ ...env, ...SECRETS })).not.toThrow();
   });
 
