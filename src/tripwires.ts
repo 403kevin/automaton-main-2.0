@@ -14,7 +14,7 @@ export interface ScanResult {
   flags: string[];
 }
 
-export const SENSE_TOOLS = ["see_page", "crawl_site", "read_feed", "browse"] as const;
+export const SENSE_TOOLS = ["see_page", "crawl_site", "read_feed", "browse", "fetch_url"] as const;
 export const QUARANTINE_EXCERPT_CHARS = 200;
 
 const FENCE_OPEN = "<<<SENSE_DATA";

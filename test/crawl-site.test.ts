@@ -664,13 +664,14 @@ describe("crawl_site ledger", () => {
       expect(crawled.output).toContain("http://93.184.216.34/start/p0");
       expect(crawled.output).toContain("m".repeat(200));
       expect(crawled.output).not.toContain("UNIQUE_TAIL");
-      expect(crawled.output).toContain("evidence/");
+      expect(crawled.output).toContain("outside your workspace");
     }
-    const agent = rig.db.prepare("SELECT workspace FROM agents WHERE id = ?").get(id) as { workspace: string };
-    const files = fs.readdirSync(path.join(agent.workspace, "evidence"));
+    // Raw crawl JSON lives under DATA_DIR/sense-raw/<agent_id>/, never in the workspace.
+    const rawDir = path.join(rig.dir, "sense-raw", id);
+    const files = fs.readdirSync(rawDir);
     expect(files).toHaveLength(1);
     expect(files[0]).toMatch(/^\d+-[0-9a-f]{8}-crawl\.json$/);
-    const saved = JSON.parse(fs.readFileSync(path.join(agent.workspace, "evidence", files[0] ?? ""), "utf8")) as CrawlSiteResult;
+    const saved = JSON.parse(fs.readFileSync(path.join(rawDir, files[0] ?? ""), "utf8")) as CrawlSiteResult;
     expect(saved.pages[0]?.markdown).toContain("UNIQUE_TAIL");
     expect(saved.robots).toBe("ok");
     const spent = rig.db.prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM spend WHERE agent_id = ?").get(id) as { n: number };

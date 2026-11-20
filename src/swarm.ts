@@ -82,6 +82,17 @@ export interface AgentRuntime {
   stop(id: string): Promise<void>;
 }
 
+/**
+ * What a sense tool method returns to senseCall. rawPath (relative to DATA_DIR) says where the tool saved its raw JSON;
+ * senseCall stores it in the evidence row and never passes it on to the agent.
+ */
+type SenseOutcome = { ok: true; handled: boolean; output?: string; rawPath?: string } | { ok: false; reason: string };
+
+/** The most body bytes fetch_url reads from a page, and the most characters it hands on. */
+const FETCH_URL_MAX_BYTES = 100_000;
+const FETCH_URL_MAX_CHARS = 12_000;
+const FETCH_URL_TIMEOUT_MS = 15_000;
+
 interface PostInput {
   agentId: string;
   kind: LedgerKind;
@@ -528,7 +539,7 @@ export class Swarm {
       if (!charged.ok) return { ok: false, reason: charged.error };
       return { ok: true, handled: false };
     }
-    if (call.name === "fetch_url" || call.name === "pay_request_fetch") {
+    if (call.name === "pay_request_fetch") {
       const review = await reviewUrl(String(args.url ?? ""), this.config.denyHosts, this.resolveHost);
       if (!review.allowed) return this.blocked(agentId, review.reason);
       const charged = this.chargeTool(agentId, "fetch_url", call.id);
@@ -1240,12 +1251,13 @@ export class Swarm {
   private async senseCall(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
-    let result: { ok: true; handled: boolean; output?: string } | { ok: false; reason: string };
+  ): Promise<SenseOutcome> {
+    let result: SenseOutcome;
     try {
       if (call.name === "see_page") result = await this.seePage(agentId, call);
       else if (call.name === "crawl_site") result = await this.crawlSite(agentId, call);
       else if (call.name === "read_feed") result = await this.readFeed(agentId, call);
+      else if (call.name === "fetch_url") result = await this.fetchUrl(agentId, call);
       else result = await this.browseTask(agentId, call);
     } catch (error) {
       this.recordEvidence(agentId, call, { status: "error", threat: "none", flags: [], raw: null });
@@ -1264,8 +1276,30 @@ export class Swarm {
       flags: guarded.flags,
       raw,
       quarantinePath,
+      rawPath: result.rawPath ?? null,
     });
     return { ok: true, handled: result.handled, output: guarded.output };
+  }
+
+  /**
+   * fetch_url is done here, not in the agent's process, so the page text passes through senseCall like every other
+   * sense result. The URL is reviewed and the price charged first, as before. Redirects are not followed, the body is
+   * read in a bounded way, and a failed fetch is a refusal (the fee stays, as it did when the agent fetched).
+   */
+  private async fetchUrl(agentId: string, call: ToolCall): Promise<SenseOutcome> {
+    const url = String(call.arguments?.url ?? "").trim();
+    const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
+    if (!review.allowed) return this.blocked(agentId, review.reason);
+    const charged = this.chargeTool(agentId, "fetch_url", call.id);
+    if (!charged.ok) return { ok: false, reason: charged.error };
+    try {
+      const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS) });
+      const text = await readBodyCapped(response, FETCH_URL_MAX_BYTES);
+      return { ok: true, handled: true, output: `HTTP ${response.status}\n${text.slice(0, FETCH_URL_MAX_CHARS)}` };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "fetch_url failed.";
+      return { ok: false, reason: `fetch_url failed: ${reason}`.slice(0, 300) };
+    }
   }
 
   private recordEvidence(
@@ -1277,6 +1311,7 @@ export class Swarm {
       flags: string[];
       raw: string | null;
       quarantinePath?: string | null;
+      rawPath?: string | null;
     },
   ): void {
     const args = call.arguments ?? {};
@@ -1284,8 +1319,8 @@ export class Swarm {
     const target = String(args.url ?? args.source ?? "").trim();
     this.db
       .prepare(
-        `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at, quarantine_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at, quarantine_path, raw_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agentId,
@@ -1298,7 +1333,32 @@ export class Swarm {
         row.flags.join(","),
         this.clock.now(),
         row.quarantinePath ?? null,
+        row.rawPath ?? null,
       );
+  }
+
+  /**
+   * Save the raw JSON a sense tool fetched under DATA_DIR/sense-raw/<agent_id>/ (mode 0600), a sibling of agents/ and
+   * never inside a workspace: the shell and read_file tools only see the workspace. Returns the path relative to
+   * DATA_DIR, which goes in the evidence row and is not shown to the agent.
+   */
+  private saveRaw(
+    agentId: string,
+    kind: "crawl" | "feed" | "browse",
+    value: unknown,
+  ): { ok: true; path: string } | { ok: false; error: string } {
+    const payload = JSON.stringify(value, null, 2);
+    const name = `${this.clock.now()}-${sha256(payload).slice(0, 8)}-${kind}.json`;
+    const relative = `sense-raw/${agentId}/${name}`;
+    try {
+      const dest = path.join(this.config.dataDir, relative);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, payload, { mode: 0o600 });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Could not save the ${kind}.`;
+      return { ok: false, error: message };
+    }
+    return { ok: true, path: relative };
   }
 
   /**
@@ -1322,7 +1382,7 @@ export class Swarm {
   private async seePage(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
     if (!agent) return { ok: false, reason: "Unknown agent." };
     const url = String(call.arguments?.url ?? "").trim();
@@ -1416,7 +1476,7 @@ export class Swarm {
   private async crawlSite(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
     if (!agent) return { ok: false, reason: "Unknown agent." };
     const url = String(call.arguments?.url ?? "").trim();
@@ -1452,14 +1512,14 @@ export class Swarm {
       const refundUnits = hold - fetched * price;
       if (refundUnits > 0) this.refundCrawl(agentId, refundUnits, call.id);
       const cost = fetched * price;
-      const saved = this.saveCrawl(agent.workspace, crawl);
+      const saved = this.saveRaw(agentId, "crawl", crawl);
       if (!saved.ok) {
         if (cost > 0) this.refundCrawl(agentId, cost, `${call.id}:save`);
         this.noteCrawl(agentId, url, 0, crawl.skipped.length, 0, "error");
         return { ok: false, reason: saved.error };
       }
       this.noteCrawl(agentId, url, fetched, crawl.skipped.length, cost, "ok", saved.path);
-      return { ok: true, handled: true, output: presentCrawl(crawl, saved.path) };
+      return { ok: true, handled: true, output: presentCrawl(crawl), rawPath: saved.path };
     } catch (error) {
       this.refundCrawl(agentId, hold, call.id);
       this.noteCrawl(agentId, url, 0, 0, 0, "error");
@@ -1505,28 +1565,10 @@ export class Swarm {
       .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
   }
 
-  private saveCrawl(
-    workspace: string,
-    crawl: CrawlSiteResult,
-  ): { ok: true; path: string } | { ok: false; error: string } {
-    const payload = JSON.stringify(crawl, null, 2);
-    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-crawl.json`;
-    const relative = `evidence/${name}`;
-    const dest = path.join(workspace, "evidence", name);
-    try {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, payload);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not save the crawl.";
-      return { ok: false, error: message };
-    }
-    return { ok: true, path: relative };
-  }
-
   private async readFeed(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
     if (!agent) return { ok: false, reason: "Unknown agent." };
     const source = String(call.arguments?.source ?? "").trim().toLowerCase();
@@ -1565,12 +1607,12 @@ export class Swarm {
         denyHosts,
         userAgent: this.config.redditUserAgent,
       });
-      const saved = this.saveFeed(agent.workspace, result);
+      const saved = this.saveRaw(agentId, "feed", result);
       // A reddit block is a completed request, so the fee stays. Senses errors refund below.
       if (result.blocked) {
         this.noteFeedBlocked(agentId, source, result.status ?? 0, result.reason ?? "blocked");
         this.noteFeed(agentId, source, query, 0, cost, "blocked", saved.ok ? saved.path : "");
-        return { ok: true, handled: true, output: presentFeed(result, saved.ok ? saved.path : "") };
+        return { ok: true, handled: true, output: presentFeed(result), rawPath: saved.ok ? saved.path : undefined };
       }
       if (!saved.ok) {
         this.refundFeed(agentId, cost, call.id);
@@ -1579,7 +1621,7 @@ export class Swarm {
       }
       const outcome = result.unavailable ? "unavailable" : "ok";
       this.noteFeed(agentId, source, query, result.items.length, cost, outcome, saved.path);
-      return { ok: true, handled: true, output: presentFeed(result, saved.path) };
+      return { ok: true, handled: true, output: presentFeed(result), rawPath: saved.path };
     } catch (error) {
       this.refundFeed(agentId, cost, call.id);
       this.noteFeed(agentId, source, query, 0, 0, "error");
@@ -1613,24 +1655,6 @@ export class Swarm {
       .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
   }
 
-  private saveFeed(
-    workspace: string,
-    result: FeedResult,
-  ): { ok: true; path: string } | { ok: false; error: string } {
-    const payload = JSON.stringify(result, null, 2);
-    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-feed.json`;
-    const relative = `evidence/${name}`;
-    const dest = path.join(workspace, "evidence", name);
-    try {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, payload);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not save the feed.";
-      return { ok: false, error: message };
-    }
-    return { ok: true, path: relative };
-  }
-
   private noteFeed(
     agentId: string,
     source: string,
@@ -1640,7 +1664,7 @@ export class Swarm {
     outcome: string,
     evidence = "",
   ): void {
-    const extra = evidence ? ` evidence=${evidence}` : "";
+    const extra = evidence ? ` raw=${evidence}` : "";
     const flat = query.replace(/\s+/g, " ").slice(0, 180);
     this.event(
       agentId,
@@ -1663,7 +1687,7 @@ export class Swarm {
     outcome: string,
     evidence = "",
   ): void {
-    const extra = evidence ? ` evidence=${evidence}` : "";
+    const extra = evidence ? ` raw=${evidence}` : "";
     this.event(
       agentId,
       "crawl_site",
@@ -1674,7 +1698,7 @@ export class Swarm {
   private async browseTask(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
     if (!agent) return { ok: false, reason: "Unknown agent." };
     const task = String(call.arguments?.task ?? "").trim();
@@ -1733,15 +1757,15 @@ export class Swarm {
       const actual = Math.min(preauth, stepCost + llmCharged);
       const refund = preauth - actual;
       if (refund > 0) this.refundBrowse(agentId, refund, call.id);
-      const saved = this.saveBrowse(agent.workspace, { task, steps, urls: result.urls, costUnits: actual, llmCostUnits: llmCost, outcome: result.outcome, result: result.result, transcript: result.transcript });
+      const saved = this.saveRaw(agentId, "browse", { task, steps, urls: result.urls, costUnits: actual, llmCostUnits: llmCost, outcome: result.outcome, result: result.result, transcript: result.transcript });
       if (!saved.ok) {
         if (actual > 0) this.refundBrowse(agentId, actual, `${call.id}:save`);
         this.noteBrowse(agentId, task, 0, result.urls, 0, "error");
         return { ok: false, reason: saved.error };
       }
       this.noteBrowse(agentId, task, steps, result.urls, actual, result.outcome || "ok", saved.path);
-      const text = [result.result, result.urls.join("\n"), `steps ${steps}`, `Saved browse to ${saved.path}.`].filter((part) => part && part.trim()).join("\n\n");
-      return { ok: true, handled: true, output: text.slice(0, 8000) };
+      const text = [result.result, result.urls.join("\n"), `steps ${steps}`, "Raw transcript stored outside your workspace."].filter((part) => part && part.trim()).join("\n\n");
+      return { ok: true, handled: true, output: text.slice(0, 8000), rawPath: saved.path };
     } catch (error) {
       try {
         llmCost = this.browseLlm.close(token);
@@ -1790,33 +1814,6 @@ export class Swarm {
       .run(agentId, -units, dayKey(this.clock.now()), this.clock.now());
   }
 
-  private saveBrowse(
-    workspace: string,
-    record: {
-      task: string;
-      steps: number;
-      urls: string[];
-      costUnits: number;
-      llmCostUnits: number;
-      outcome: string;
-      result: string;
-      transcript: unknown;
-    },
-  ): { ok: true; path: string } | { ok: false; error: string } {
-    const payload = JSON.stringify(record, null, 2);
-    const name = `${this.clock.now()}-${createHash("sha256").update(payload).digest("hex").slice(0, 8)}-browse.json`;
-    const relative = `evidence/${name}`;
-    const dest = path.join(workspace, "evidence", name);
-    try {
-      fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, payload);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Could not save the browse.";
-      return { ok: false, error: message };
-    }
-    return { ok: true, path: relative };
-  }
-
   private noteBrowse(
     agentId: string,
     task: string,
@@ -1826,7 +1823,7 @@ export class Swarm {
     outcome: string,
     evidence = "",
   ): void {
-    const extra = evidence ? ` evidence=${evidence}` : "";
+    const extra = evidence ? ` raw=${evidence}` : "";
     const flat = task.replace(/\s+/g, " ").slice(0, 120);
     const visited = urls.slice(0, 8).join(",");
     this.event(
@@ -2173,8 +2170,8 @@ function readFeedOptions(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function presentFeed(result: FeedResult, evidence: string): string {
-  const saved = evidence ? `Saved feed to ${evidence}.` : "";
+function presentFeed(result: FeedResult): string {
+  const saved = "Raw feed stored outside your workspace.";
   if (result.blocked) {
     return [`blocked=true source=${result.source} status=${result.status ?? ""}`, result.reason ?? "", saved]
       .filter((part) => part.trim())
@@ -2196,10 +2193,10 @@ function presentFeed(result: FeedResult, evidence: string): string {
   return parts.join("\n\n").slice(0, 8000);
 }
 
-function presentCrawl(crawl: CrawlSiteResult, evidence: string): string {
+function presentCrawl(crawl: CrawlSiteResult): string {
   const parts = [
     `robots=${crawl.robots} fetched=${crawl.pages.length} skipped=${crawl.skipped.length}`,
-    `Saved crawl to ${evidence}.`,
+    "Raw crawl stored outside your workspace.",
   ];
   for (const page of crawl.pages) {
     const body = page.markdown.length > CRAWL_PREVIEW_CHARS ? page.markdown.slice(0, CRAWL_PREVIEW_CHARS) : page.markdown;
@@ -2209,6 +2206,22 @@ function presentCrawl(crawl: CrawlSiteResult, evidence: string): string {
     parts.push(`Skipped:\n${crawl.skipped.map((item) => `${item.url} ${item.reason}`).join("\n")}`);
   }
   return parts.join("\n\n");
+}
+
+/** Read at most maxBytes of a response body, so a huge page cannot fill the orchestrator's memory. */
+async function readBodyCapped(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (total < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+  }
+  await reader.cancel().catch(() => undefined);
+  return Buffer.concat(chunks).subarray(0, maxBytes).toString("utf8");
 }
 
 function sha256(value: string): string {
