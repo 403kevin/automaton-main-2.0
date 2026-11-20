@@ -83,5 +83,7 @@ Every section covers the last 24 hours (the existing sections already do) and an
 
 ## Further Notes
 
+- **Built as follows, where the build refined this spec.** A tripwire hit is a scan that flagged the text: an `evidence` row with non-empty `flags`, or a `claims` row scanned above `low` (`low` is the clean baseline of a scan, so counting every non-`none` row would count everything). "Notable actions" shows a swarm wallet address as `<agent>'s wallet`: the address is random per agent, and the snapshot has to be the same on every run (display only; the stored event is unchanged). The model-reliability lede no longer mentions lost wakes. The Predictions section prints a "By metric" block with all four metrics, and the self-inflatable note even when there are no predictions. The remote path in `pull-reports.sh` is `$AUTOMATON_REMOTE_DIR` (default `automaton`).
+
 - Evidence coverage compares counts (paid sense calls against evidence rows), so a paid call with no evidence row shows as a shortfall, but an evidence row cannot be matched to its debit.
 - "Tool calls seen" misses free successful calls by construction; no table records them.
