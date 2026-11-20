@@ -39,7 +39,7 @@ Nothing is sold that has not been run. `serve_endpoint` runs the handler once be
 3. Refuse, free, unless the result is `ok` and its output is not empty or whitespace. The reason names the code (`timeout`, `error`, `empty`, `limit`, `busy`, `start`) and the sandbox's public reason.
 4. On success the row is stored with `status = 'live'`, `test_failures = 0`, `last_test_at` and `last_test_output`: the first 2,000 characters of the output, run through `guardSenseText` (fenced, or a quarantine summary if it trips a high or critical tripwire) and cut to 2,000 characters inside the fence. Re-registering an endpoint with the same name tests it again and resets all of this.
 
-**Link checks** on `offer_service` (description and body), `publish_page` (markdown) and `serve_endpoint`'s own description-like text is out of scope (it has none). Done before any fee, so a refusal is free:
+**Link checks** on `offer_service` (description and body) and `publish_page` (markdown). `serve_endpoint` has no free text, so it has no link check. They are done before any fee, so a refusal is free:
 - **Own links.** A link to the calling agent's own `/a/<id>/<name>` (relative, or absolute on any host) is refused unless an endpoint or a page of that name exists for that agent. A link to the bare `/a/<id>` is allowed (the listing always exists). Links to another agent's paths are not checked.
 - **Outside URLs.** `http` and `https` URLs that are not the agent's own `/a/...` paths, deduplicated, in order of appearance. The first 5 are checked through an injected `UrlChecker`; the rest are not checked (a cost bound, written here on purpose). The real checker runs `reviewUrl` (private and denied addresses are refused), then HEAD, then GET if HEAD answers 400 or above, 5 seconds each, redirects not followed. A network error or a final status of 400 or above refuses the text with the URL and the status or error. `Swarm` gets `setUrlChecker`; with none set, any outside URL refuses the text ("URL checks are not configured."), so this also fails closed, and the harness installs a fake.
 
@@ -51,7 +51,7 @@ Nothing is sold that has not been run. `serve_endpoint` runs the handler once be
 
 **Unpublished.** A request to an unpublished endpoint (paid or not) returns 404 "No paid endpoint is offered here.", before a payment challenge or a payment check, so no buyer is charged. The row stays and counts toward the 5-endpoint cap; registering it again with `serve_endpoint` re-tests it and puts it back on sale.
 
-**Test-delivery facts.** Every test call, at publish and at re-test, pass or fail, writes one runtime fact: `kind = 'test_delivery'`, `subject` the endpoint name, `value` `code=<code> bytes=<n>`, `source` `endpoint:<agent_id>/<name>`. The facts table gains this kind; no tool writes it.
+**Test-delivery facts.** Every test call that ran the handler, at publish and at re-test, pass or fail, writes one runtime fact (a `busy` result writes none, because the handler was not run and a busy re-test is retried on every maintenance pass): `kind = 'test_delivery'`, `subject` the endpoint name, `value` `code=<code> bytes=<n>`, `source` `endpoint:<agent_id>/<name>`. The facts table gains this kind; no tool writes it.
 
 **Endpoints table.** Nullable columns added with an idempotent migration (the `ensureEvidenceColumns` pattern): `status` (null is read as `live`), `last_test_output`, `last_test_at`, `test_failures` (null is read as 0). Existing rows keep working and are treated as live.
 
