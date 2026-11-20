@@ -38,7 +38,13 @@ Detectors run on the raw text and on a copy with hidden characters removed, so `
 - bare `system:` is dropped; only a line that starts with `system:`, `assistant:` or `user:` counts.
 - the Cyrillic homoglyph test is dropped (it flags every Russian page); the multi-language injection phrases stay.
 - the long-base64 test ignores URLs.
-- `pay me` is dropped; `send … usdc/funds/money/credits`, `transfer`, `withdraw`, `drain`, `empty your wallet` and `send to 0x…` stay.
+- `pay me` is dropped. Money verbs now need "your" or "all" (`send all your USDC`), so a remittance page that says "send money abroad" is not critical; `send … to 0x<address>`, `drain`, and `empty your wallet` stay.
+- `forget your password` is not an injection: `forget` needs `everything`, `all previous/prior/your`, or `your instructions/rules/training`.
+- `from anthropic` is dropped (news pages say it).
+- Self-harm list: `drop table` and bare `rm -rf` are dropped (SQL and shell tutorials); `rm -rf` stays only against `/`, `~`, `$HOME` or `*`; `delete … memory/logs` needs "your".
+- `secret_exfiltration` treats a negation right before the verb ("never share your private key") as advice, not an attack. This is a known gap: an attacker can place "not" before the verb.
+- `tool_markers` matches tag-shaped text only (`</tool>`, `<tool_result>`, `<function_call>`), not the bare words `tool_call` / `function_call`, which appear in API docs.
+- Known false-positive risks left in: `execute the following` and `run this command` (tutorial pages) flag `medium`; zero-width joiners in emoji sequences and Persian text flag `hidden_text` at `medium` and are stripped.
 
 **Level rules** (1.0 `computeThreatLevel`, extended): critical = `financial_manipulation`, `secret_exfiltration`, `self_harm_instructions`, `chatml_markers`, `multi_language_injection`, or `hidden_text` together with `instruction_patterns`. High = `boundary_manipulation`, `tool_markers` or `fence_forgery` alone. Medium = `instruction_patterns`, `authority_claims`, `obfuscation` or `hidden_text` alone. Low = nothing detected.
 
@@ -55,7 +61,7 @@ Before the body goes in, hidden characters, ChatML markers, system/prompt/INST t
 
 **Quarantine.** Applies at `high` and `critical`. The agent receives the fenced result `quarantined=true threat=<level> flags=<comma list>`, a sanitised excerpt of at most 200 characters, and the evidence path. The raw output is written to the agent's workspace `evidence/` folder before the result is returned. Medium and low output is delivered in the fence (medium also names its flags). The fee has already been charged by the tool and is neither refunded nor increased by quarantine.
 
-**Evidence table.** One row per sense call, written at a single wrap point in `handleTool` that all four tools pass through (so a fifth sense tool added later is covered by adding one name to a list). Columns: `id` (integer primary key), `agent_id`, `tool`, `input_hash` (sha256 of the call arguments, keys sorted), `output_hash` (sha256 of the raw output before fencing, null when there was no output), `url` (the call's `url`, or `source` for `read_feed`, null for `browse`), `status` (`ok`, `quarantined`, `refused`, `error`), `threat_level`, `flags` (comma list, empty when none), `created_at`. A call that comes back `ok: false` is `refused` with threat `none`; an exception inside the wrapper is `error`, recorded, then rethrown.
+**Evidence table.** One row per sense call, written at a single wrap point in `handleTool` that all four tools pass through (so a fifth sense tool added later is covered by adding one name to a list). Columns: `id` (integer primary key), `agent_id`, `tool`, `input_hash` (sha256 of the call arguments as JSON, top-level keys sorted), `output_hash` (sha256 of the raw output before fencing, null when there was no output), `url` (the call's `url`, or `source` for `read_feed`, null for `browse`), `status` (`ok`, `quarantined`, `refused`, `error`), `threat_level`, `flags` (comma list, empty when none), `created_at`. A call that comes back `ok: false` is `refused` with threat `none`; an exception inside the wrapper is `error`, recorded, then rethrown.
 
 **Turn summary.** The agent loop currently cuts the joined notes at 1800 characters. It is changed to hand each note the room that is left and to cut a fenced note inside its fence.
 
