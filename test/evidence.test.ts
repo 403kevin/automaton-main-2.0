@@ -263,6 +263,7 @@ describe("turn summary keeps the closing fence", () => {
         turns.push(text);
         controller.abort();
       },
+      recordRefusal: async () => undefined,
     };
     const agent = getAgent(box.db, box.id);
     if (!agent) throw new Error("missing");
