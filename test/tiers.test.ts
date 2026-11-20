@@ -9,7 +9,8 @@ afterEach(() => {
 
 describe("survival tiers", () => {
   it("selects heretic-capable model ids from balance, including a per-agent override", async () => {
-    const rig = harness();
+    // The per-agent override must be on ALLOWED_MODELS (BO-2.4b).
+    const rig = harness({ ALLOWED_MODELS: "org/heretic-normal,org/heretic-low,org/heretic-critical,org/custom-heretic" });
     cleanups.push(rig.cleanup);
     const broke = await rig.swarm.createAgent({ name: "broke" });
     const critical = await rig.swarm.createAgent({ name: "thin" });

@@ -1524,7 +1524,6 @@ export class Swarm {
     lines.push("");
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));
     lines.push(...refusalReportLines(this.db, since, names));
-    lines.push(...predictionReportLines(this.db, since, names));
     lines.push(
       ...modelReliabilityLines(
         this.db,
@@ -1533,6 +1532,7 @@ export class Swarm {
         this.living().map((agent) => ({ id: agent.id, name: agent.name, assigned: agent.model || this.config.defaultModel })),
       ),
     );
+    lines.push(...predictionReportLines(this.db, since, names));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
