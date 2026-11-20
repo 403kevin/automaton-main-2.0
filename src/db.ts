@@ -108,6 +108,20 @@ CREATE TABLE IF NOT EXISTS sim_balances (
   units INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  input_hash TEXT,
+  output_hash TEXT,
+  url TEXT,
+  status TEXT NOT NULL,
+  threat_level TEXT NOT NULL,
+  flags TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS evidence_agent ON evidence(agent_id, id);
 CREATE INDEX IF NOT EXISTS ledger_agent ON ledger_entries(agent_id);
 CREATE INDEX IF NOT EXISTS spend_day ON spend(day, agent_id);
 `;

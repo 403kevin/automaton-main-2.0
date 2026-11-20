@@ -37,6 +37,7 @@ import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
 import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
+import { fenceSenseOutput, quarantineResult, scanSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
 import { rateLimitCounts } from "./http.js";
@@ -547,10 +548,7 @@ export class Swarm {
       if (!charged.ok) return { ok: false, reason: charged.error };
       return { ok: true, handled: false };
     }
-    if (call.name === "see_page") return this.seePage(agentId, call);
-    if (call.name === "crawl_site") return this.crawlSite(agentId, call);
-    if (call.name === "read_feed") return this.readFeed(agentId, call);
-    if (call.name === "browse") return this.browseTask(agentId, call);
+    if ((SENSE_TOOLS as readonly string[]).includes(call.name)) return this.senseCall(agentId, call);
     if (call.name === "web_search") {
       const query = String(args.query ?? "").slice(0, 300);
       if (!query) return { ok: false, reason: "Query is empty." };
@@ -1233,6 +1231,81 @@ export class Swarm {
     const debited = this.debit(agentId, Number(price), "x402", `x402-out:${nonce}`, `external ${url}`);
     if (!debited.ok) return { ok: false, error: `The remote server accepted payment but the ledger debit failed: ${debited.error}` };
     return { ok: true, value: body };
+  }
+
+  /**
+   * The single point every sense tool passes through. The tool runs unchanged (fees, refunds and limits are its own);
+   * here its output is scanned, fenced or quarantined, and exactly one evidence row is written.
+   */
+  private async senseCall(
+    agentId: string,
+    call: ToolCall,
+  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+    let result: { ok: true; handled: boolean; output?: string } | { ok: false; reason: string };
+    try {
+      if (call.name === "see_page") result = await this.seePage(agentId, call);
+      else if (call.name === "crawl_site") result = await this.crawlSite(agentId, call);
+      else if (call.name === "read_feed") result = await this.readFeed(agentId, call);
+      else result = await this.browseTask(agentId, call);
+    } catch (error) {
+      this.recordEvidence(agentId, call, { status: "error", threat: "none", flags: [], raw: null });
+      throw error;
+    }
+    if (!result.ok) {
+      this.recordEvidence(agentId, call, { status: "refused", threat: "none", flags: [], raw: null });
+      return result;
+    }
+    const raw = result.output ?? "";
+    const scan = scanSenseText(raw);
+    if (scan.level === "high" || scan.level === "critical") {
+      const savedPath = this.saveQuarantine(agentId, raw);
+      this.recordEvidence(agentId, call, { status: "quarantined", threat: scan.level, flags: scan.flags, raw });
+      const output = quarantineResult({ tool: call.name, threat: scan.level, flags: scan.flags, raw, savedPath });
+      return { ok: true, handled: result.handled, output };
+    }
+    this.recordEvidence(agentId, call, { status: "ok", threat: scan.level, flags: scan.flags, raw });
+    const note = scan.flags.length > 0 ? `Tripwire flags: ${scan.flags.join(",")}` : undefined;
+    const output = fenceSenseOutput({ tool: call.name, threat: scan.level, body: raw, note });
+    return { ok: true, handled: result.handled, output };
+  }
+
+  private recordEvidence(
+    agentId: string,
+    call: ToolCall,
+    row: { status: "ok" | "quarantined" | "refused" | "error"; threat: ThreatLevel; flags: string[]; raw: string | null },
+  ): void {
+    const args = call.arguments ?? {};
+    const sorted = Object.fromEntries(Object.entries(args).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+    const target = String(args.url ?? args.source ?? "").trim();
+    this.db
+      .prepare(
+        `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        agentId,
+        call.name,
+        sha256(JSON.stringify(sorted)),
+        row.raw === null ? null : sha256(row.raw),
+        target ? target.slice(0, 500) : null,
+        row.status,
+        row.threat,
+        row.flags.join(","),
+        this.clock.now(),
+      );
+  }
+
+  private saveQuarantine(agentId: string, raw: string): string | null {
+    const agent = getAgent(this.db, agentId);
+    if (!agent) return null;
+    const name = `${this.clock.now()}-${sha256(raw).slice(0, 8)}-quarantine.txt`;
+    try {
+      fs.mkdirSync(path.join(agent.workspace, "evidence"), { recursive: true });
+      fs.writeFileSync(path.join(agent.workspace, "evidence", name), raw);
+    } catch {
+      return null;
+    }
+    return `evidence/${name}`;
   }
 
   private async seePage(

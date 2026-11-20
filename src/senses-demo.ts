@@ -251,7 +251,7 @@ export function formatStageDemo(report: StageDemoReport): string {
   const prelude = [
     `Stage 1 demo  mode ${report.mode}  money dry-run  network ${report.network || "unknown"}  mainnet ${report.allowMainnet ? "OPEN" : "locked"}  llm ${report.llmMode || "unknown"}  browse ${report.browseEnabled ? "on" : "off"}`,
     `agent ${report.agentId || "(none)"}  opening ${formatUsd(report.openingUnits)}  closing ${formatUsd(report.closingUnits)}`,
-    "Records are events.id and ledger_entries.id. There is no separate evidence table.",
+    "Records are events.id and ledger_entries.id. Each sense call also writes one evidence row.",
   ];
   const table = [line(header), ...body.map(line)];
   return [...prelude, "", ...table].join("\n");
