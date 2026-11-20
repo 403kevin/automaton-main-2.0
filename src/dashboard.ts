@@ -150,6 +150,7 @@ function render(data) {
     card.append(nums);
     card.append(el("p", agent.walletAddress, "meta"));
     card.append(el("p", "Model " + agent.model + (agent.containerId ? " · " + agent.containerId : ""), "meta"));
+    if (agent.assigned) card.append(el("p", "Assigned " + agent.assigned.model + " · low " + agent.assigned.lowModel + " · critical " + agent.assigned.criticalModel, "meta"));
     if (agent.graceUntil) card.append(el("p", "Grace until " + new Date(agent.graceUntil).toISOString(), "meta"));
     const actions = document.createElement("ul");
     const list = agent.lastActions.length ? agent.lastActions : (agent.lastAction ? [{ text: agent.lastAction }] : []);

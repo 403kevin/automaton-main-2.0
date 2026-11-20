@@ -6,6 +6,9 @@ services:
     build: .
     ports:
       - "4747:4747"
+    env_file:
+      - path: .env
+        required: false
     environment:
       PORT: "4747"
       HOST: 0.0.0.0
@@ -16,8 +19,8 @@ services:
       RUNTIME: docker
       LLM_MODE: ${LLM_MODE:-mock}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      WALLET_MASTER_KEY: ${WALLET_MASTER_KEY:-dev-only-master-key-change-me}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-admin-token-change-me}
+      WALLET_MASTER_KEY: ${WALLET_MASTER_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       TREASURY_ADDRESS: ${TREASURY_ADDRESS:-0x1111111111111111111111111111111111111111}
       AGENT_IMAGE: automaton:2
       DOCKER_NETWORK: automaton_default

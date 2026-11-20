@@ -191,7 +191,7 @@ describe("the admin route for an agent's model", () => {
     expect((await post(server.url, `/admin/agents/${made.id}/model`, {}, ADMIN)).status).toBe(400);
     expect((await post(server.url, `/admin/agents/${made.id}/model`, { model: 42 }, ADMIN)).status).toBe(400);
     expect((await post(server.url, `/admin/agents/a${"0".repeat(12)}/model`, { model: OTHER }, ADMIN)).status).toBe(400);
-    await box.swarm.archive(made.id, "test");
+    await (box.swarm as unknown as { archive(id: string, reason: string): Promise<void> }).archive(made.id, "test");
     expect((await post(server.url, `/admin/agents/${made.id}/model`, { model: OTHER }, ADMIN)).status).toBe(400);
   });
 

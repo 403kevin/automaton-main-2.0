@@ -203,6 +203,14 @@ Free gate attempts are capped. `OFFER_CHECK_HOURLY_LIMIT` (default 20) counts an
 
 The HTTP client retries a 429, a 502 and a 503, at most four attempts, with backoff and `retry-after`; a 500 or any other 4xx is not retried. The 502 and 503 retries apply to the model and search calls only: the x402 settlement call moves money, so it is retried on a 429 but never on a gateway error. When every model fails, the turn records a `lost_wake` event with the reason, nothing is debited, and no refusal row is written (it is not a tool refusal). The daily report has a "## Model reliability" section with lost wakes per agent and turns per served model.
 
+## Choosing a model per agent
+
+Every agent runs on `DEFAULT_MODEL` (and the low-compute and critical models by tier) unless it was given its own. `ALLOWED_MODELS` is the list of models an agent may be assigned; unset, it is every model the config already names (default, low-compute, critical, council and fallback). Creating an agent, spawning a child, the admin route and the soak seeding all refuse a model that is not on it, and at start-up an agent whose stored model is no longer listed goes back to the global model, with an `agent_model_reset` event.
+
+The owner changes an agent's models with `POST /admin/agents/<id>/model` and the admin token: `model`, `lowModel` and `criticalModel` are each optional, a string must be on the list and `null` means "use the global model". It writes an `agent_model_changed` event. No agent tool and no `/internal` route can change a model. A child starts with its parent's three models, and a later change to the parent does not touch it. The soak seeding takes `SOAK_AGENT_MODELS=name=model id` (agent names `mite`, `keel`, `wick`) and gives that agent the model on every tier. The dashboard shows each agent's assigned models, and the daily report's "Model reliability" section lists, per agent, the model it was assigned and the models that served its turns. The constitution, the refusals, the tripwires and the spend caps do not look at which model an agent runs on.
+
+Compose passes every setting through: the plain path reads `.env` and the safe path (`docker-compose.safe.yml`) requires `.env.soak`. No compose file gives a secret a default; the safe file refuses to start without them.
+
 ## Hands: browse (off by default)
 
 `browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.
@@ -264,7 +272,7 @@ This is the profile in `config/soak.sepolia.env`. It is live testnet money, thre
 
 Safe defaults: copy `config/soak.env.template` to `.env.soak` and pass `-f docker-compose.safe.yml` last.
 
-On 17 November 2026 the OpenRouter catalog (474 models) had no slug containing "heretic". The profile uses `cognitivecomputations/dolphin-mistral-24b-venice-edition`, the uncensored Dolphin that is listed. Set `DEFAULT_MODEL` to a heretic slug when one appears. The string is not rewritten.
+The profile's default model is `mistralai/mistral-small-3.2-24b-instruct`. Dolphin was dropped on 20 November 2026 because it has no tool calling, and no uncensored or abliterated build on OpenRouter supports tools. Any slug is passed through, so `DEFAULT_MODEL` can be changed.
 
 On a small Linux VPS:
 

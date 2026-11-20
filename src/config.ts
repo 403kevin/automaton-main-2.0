@@ -43,6 +43,8 @@ export interface AppConfig {
   councilModels: string[];
   /** Models OpenRouter tries, in order, when the primary fails. At most 3. Empty means no fallback. */
   fallbackModels: string[];
+  /** Models an agent may be assigned. Unset, it is every model this config already names. */
+  allowedModels: string[];
   /** USD per million tokens by model id, used when OpenRouter returns no cost. Empty by default. */
   modelPrices: Record<string, ModelPrice>;
   inferenceReserveUnits: number;
@@ -150,6 +152,22 @@ function parseFallbackModels(raw: string | undefined): string[] {
     throw new Error(`FALLBACK_MODELS can list at most ${MAX_FALLBACK_MODELS} models.`);
   }
   return models;
+}
+
+/** The refusal for a model that is not on ALLOWED_MODELS. One wording, used by the swarm, the admin route and the seeding. */
+export function notAllowedModel(model: string): string {
+  return `Model ${model.slice(0, 100)} is not on the allowed models list.`;
+}
+
+/** ALLOWED_MODELS: comma-separated, trimmed, de-duplicated. Unset or empty means the models the config already names. */
+function parseAllowedModels(raw: string | undefined, named: string[]): string[] {
+  const models: string[] = [];
+  for (const item of (raw ?? "").split(",")) {
+    const model = item.trim();
+    if (model && !models.includes(model)) models.push(model);
+  }
+  if (models.length > 0) return models;
+  return named.filter((model, index) => model && named.indexOf(model) === index);
 }
 
 /** MODEL_PRICES is JSON: { "<model id>": { "promptPerM": <usd>, "completionPerM": <usd> } }. Empty means none. */
@@ -301,6 +319,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
 
   const fallbackModels = parseFallbackModels(env.FALLBACK_MODELS);
   const modelPrices = parseModelPrices(env.MODEL_PRICES);
+  const defaultModel = env.DEFAULT_MODEL || "meta-llama/llama-3.1-8b-instruct";
+  const lowModel = env.LOW_COMPUTE_MODEL || "meta-llama/llama-3.1-8b-instruct";
+  const criticalModel = env.CRITICAL_MODEL || "meta-llama/llama-3.1-8b-instruct";
+  const allowedModels = parseAllowedModels(env.ALLOWED_MODELS, [defaultModel, lowModel, criticalModel, ...councilModels, ...fallbackModels]);
 
   return {
     host: env.HOST ?? "0.0.0.0",
@@ -333,11 +355,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     councilFeeUnits: usd(env.COUNCIL_FEE_USD, "0.02", "COUNCIL_FEE_USD"),
     councilModels,
     fallbackModels,
+    allowedModels,
     modelPrices,
     inferenceReserveUnits: usd(env.INFERENCE_RESERVE_USD, "0.02", "INFERENCE_RESERVE_USD"),
-    defaultModel: env.DEFAULT_MODEL || "meta-llama/llama-3.1-8b-instruct",
-    lowModel: env.LOW_COMPUTE_MODEL || "meta-llama/llama-3.1-8b-instruct",
-    criticalModel: env.CRITICAL_MODEL || "meta-llama/llama-3.1-8b-instruct",
+    defaultModel,
+    lowModel,
+    criticalModel,
     llmMode,
     openRouterKey: env.OPENROUTER_API_KEY,
     openRouterUrl: env.OPENROUTER_URL ?? "https://openrouter.ai/api/v1/chat/completions",

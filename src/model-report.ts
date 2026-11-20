@@ -6,7 +6,12 @@ import { sanitizeSenseText } from "./tripwires.js";
  * turns each model actually served. A lost wake is a turn where every model failed; it is counted from the lost_wake events.
  * The served model of a turn is the orchestrator's own record (turns.model), never something an agent's container reports.
  */
-export function modelReliabilityLines(db: DatabaseSync, since: number, names: Map<string, string>): string[] {
+export function modelReliabilityLines(
+  db: DatabaseSync,
+  since: number,
+  names: Map<string, string>,
+  agents: Array<{ id: string; name: string; assigned: string }> = [],
+): string[] {
   const lost = db
     .prepare("SELECT agent_id, COUNT(*) AS n FROM events WHERE kind = 'lost_wake' AND created_at >= ? AND agent_id IS NOT NULL GROUP BY agent_id")
     .all(since) as unknown as Array<{ agent_id: string; n: number }>;
@@ -16,6 +21,7 @@ export function modelReliabilityLines(db: DatabaseSync, since: number, names: Ma
   const lines = ["## Model reliability", ""];
   if (lost.length === 0 && served.length === 0) {
     lines.push("- None in the last day.", "");
+    lines.push(...assignedAndServed(db, since, agents));
     return lines;
   }
   lines.push("Last 24 hours.", "", "### Lost wakes");
@@ -26,6 +32,23 @@ export function modelReliabilityLines(db: DatabaseSync, since: number, names: Ma
   lines.push("", "### Turns per served model");
   if (served.length === 0) lines.push("- None in the last day.");
   for (const row of served) lines.push(`- ${sanitizeSenseText(row.model)}: ${row.n}`);
+  lines.push("");
+  lines.push(...assignedAndServed(db, since, agents));
+  return lines;
+}
+
+/** One line per living agent: the model it was assigned and the models that actually served its turns in the last day. */
+function assignedAndServed(db: DatabaseSync, since: number, agents: Array<{ id: string; name: string; assigned: string }>): string[] {
+  if (agents.length === 0) return [];
+  const rows = db
+    .prepare("SELECT agent_id, model, COUNT(*) AS n FROM turns WHERE model IS NOT NULL AND created_at >= ? GROUP BY agent_id, model ORDER BY n DESC, model")
+    .all(since) as unknown as Array<{ agent_id: string; model: string; n: number }>;
+  const lines = ["### Assigned and served"];
+  const sorted = [...agents].sort((a, b) => a.name.localeCompare(b.name));
+  for (const agent of sorted) {
+    const served = rows.filter((row) => row.agent_id === agent.id).map((row) => `${sanitizeSenseText(row.model)} ${row.n}`);
+    lines.push(`- ${sanitizeSenseText(agent.name)}: assigned ${sanitizeSenseText(agent.assigned)} -> served ${served.length ? served.join(", ") : "none"}`);
+  }
   lines.push("");
   return lines;
 }

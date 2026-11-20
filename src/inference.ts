@@ -75,7 +75,7 @@ export class InferenceGateway {
           ],
         });
         voices.push(`${model}: ${reply.content}`);
-        spent += billable(reply.usage, model, ceiling, this.config.modelPrices);
+        spent += billable(reply.usage, reply.model || model, ceiling, this.config.modelPrices);
       } catch (error) {
         voices.push(`${model}: unavailable (${error instanceof Error ? error.message : "error"})`);
       }
@@ -90,7 +90,7 @@ export class InferenceGateway {
         ],
       });
       synthesis = synth.content || synthesis;
-      spent += billable(synth.usage, snapshot.model, synthCeiling, this.config.modelPrices);
+      spent += billable(synth.usage, synth.model || snapshot.model, synthCeiling, this.config.modelPrices);
     } catch {
       synthesis = voices.join("\n");
     }
