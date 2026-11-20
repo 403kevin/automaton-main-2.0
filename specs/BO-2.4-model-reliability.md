@@ -1,6 +1,7 @@
 # BO-2.4 — model fallback, backoff on 502/503/429, lost wakes (+ facts round trip)
 
 Spec for ORDER BO-2.4 (section 33 of `AUTOMATON_COLLAB_FOR_GROK.md`), plan row BO-2.4: a `FALLBACK_MODELS` list (at most 3) sent to OpenRouter, backoff on 502, 503 and 429, and a report of lost wakes and of which model actually served each turn. Acceptance: a mocked 503 then 200 succeeds; a mocked all-fail gives `lost_wake` with no debit; the report counts lost wakes and which model served each turn. Also carries over ruling (c) from the BO-2.7 review: a round-trip test that drives the real fact writers. Follows [BO-2.7](BO-2.7-predict-settlement.md).
+Follow-up: [BO-2.4b](BO-2.4b-agent-model-compose.md) adds the per-agent model allowlist and admin route, removes Dolphin from the soak profiles, prices council voices by the served model, and makes every config variable reach the container.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 The fallback list is plumbing, not steering: it decides which model answers when the primary cannot, never what an agent does.
 
