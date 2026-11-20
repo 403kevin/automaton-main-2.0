@@ -37,7 +37,7 @@ import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
 import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
-import { fenceSenseOutput, quarantineResult, scanSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
+import { guardSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
 import { rateLimitCounts } from "./http.js";
@@ -1256,31 +1256,36 @@ export class Swarm {
       return result;
     }
     const raw = result.output ?? "";
-    const scan = scanSenseText(raw);
-    if (scan.level === "high" || scan.level === "critical") {
-      const savedPath = this.saveQuarantine(agentId, raw);
-      this.recordEvidence(agentId, call, { status: "quarantined", threat: scan.level, flags: scan.flags, raw });
-      const output = quarantineResult({ tool: call.name, threat: scan.level, flags: scan.flags, raw, savedPath });
-      return { ok: true, handled: result.handled, output };
-    }
-    this.recordEvidence(agentId, call, { status: "ok", threat: scan.level, flags: scan.flags, raw });
-    const note = scan.flags.length > 0 ? `Tripwire flags: ${scan.flags.join(",")}` : undefined;
-    const output = fenceSenseOutput({ tool: call.name, threat: scan.level, body: raw, note });
-    return { ok: true, handled: result.handled, output };
+    const guarded = guardSenseText(call.name, raw);
+    const quarantinePath = guarded.quarantined ? this.saveQuarantine(agentId, raw) : null;
+    this.recordEvidence(agentId, call, {
+      status: guarded.quarantined ? "quarantined" : "ok",
+      threat: guarded.level,
+      flags: guarded.flags,
+      raw,
+      quarantinePath,
+    });
+    return { ok: true, handled: result.handled, output: guarded.output };
   }
 
   private recordEvidence(
     agentId: string,
     call: ToolCall,
-    row: { status: "ok" | "quarantined" | "refused" | "error"; threat: ThreatLevel; flags: string[]; raw: string | null },
+    row: {
+      status: "ok" | "quarantined" | "refused" | "error";
+      threat: ThreatLevel;
+      flags: string[];
+      raw: string | null;
+      quarantinePath?: string | null;
+    },
   ): void {
     const args = call.arguments ?? {};
     const sorted = Object.fromEntries(Object.entries(args).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
     const target = String(args.url ?? args.source ?? "").trim();
     this.db
       .prepare(
-        `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at, quarantine_path)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agentId,
@@ -1292,20 +1297,26 @@ export class Swarm {
         row.threat,
         row.flags.join(","),
         this.clock.now(),
+        row.quarantinePath ?? null,
       );
   }
 
+  /**
+   * Keep quarantined raw text under DATA_DIR/quarantine/<agent_id>/, a sibling of agents/ and never inside a workspace.
+   * Runtimes mount only the workspace, so the agent cannot reach this folder. Returns the path relative to DATA_DIR,
+   * or null when the file could not be written (the call is still quarantined).
+   */
   private saveQuarantine(agentId: string, raw: string): string | null {
-    const agent = getAgent(this.db, agentId);
-    if (!agent) return null;
-    const name = `${this.clock.now()}-${sha256(raw).slice(0, 8)}-quarantine.txt`;
+    const name = `${this.clock.now()}-${sha256(raw).slice(0, 8)}.txt`;
+    const relative = `quarantine/${agentId}/${name}`;
     try {
-      fs.mkdirSync(path.join(agent.workspace, "evidence"), { recursive: true });
-      fs.writeFileSync(path.join(agent.workspace, "evidence", name), raw);
+      const dest = path.join(this.config.dataDir, relative);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, raw, { mode: 0o600 });
     } catch {
       return null;
     }
-    return `evidence/${name}`;
+    return relative;
   }
 
   private async seePage(

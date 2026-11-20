@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 /**
  * Tripwires for text that comes back from the four sense tools.
@@ -205,21 +205,41 @@ export interface QuarantineInput {
   threat: ScanLevel;
   flags: string[];
   raw: string;
-  /** Workspace-relative path of the saved raw text, or null when it could not be saved. */
-  savedPath: string | null;
   nonce?: string;
 }
 
-/** The result an agent gets instead of high or critical output: levels, flag names, a short sanitised excerpt, the path. */
+/**
+ * The result an agent gets instead of high or critical output: levels, flag names, the sha256 of the raw text and a
+ * short sanitised excerpt. It never carries a path: where the raw text is kept is for the owner, not the agent.
+ */
 export function quarantineResult(input: QuarantineInput): string {
   const excerpt = sanitizeSenseText(input.raw).replace(/\s+/g, " ").trim().slice(0, QUARANTINE_EXCERPT_CHARS);
   const body = [
     `quarantined=true threat=${input.threat} flags=${input.flags.join(",")}`,
     "Raw output withheld because it looks like an attack on you.",
+    `sha256=${createHash("sha256").update(input.raw).digest("hex")}`,
     `Excerpt (untrusted): ${excerpt}`,
-    input.savedPath ? `Raw text saved to ${input.savedPath}.` : "Raw text could not be saved.",
   ].join("\n");
   return fenceSenseOutput({ tool: input.tool, threat: input.threat, body, nonce: input.nonce });
+}
+
+export interface Guarded {
+  output: string;
+  level: ScanLevel;
+  flags: string[];
+  quarantined: boolean;
+}
+
+/** Scan text and return what the agent may see: a fence (medium and low) or a quarantine result (high and critical). */
+export function guardSenseText(tool: string, raw: string): Guarded {
+  const scan = scanSenseText(raw);
+  if (scan.level === "high" || scan.level === "critical") {
+    const output = quarantineResult({ tool, threat: scan.level, flags: scan.flags, raw });
+    return { output, level: scan.level, flags: scan.flags, quarantined: true };
+  }
+  const note = scan.flags.length > 0 ? `Tripwire flags: ${scan.flags.join(",")}` : undefined;
+  const output = fenceSenseOutput({ tool, threat: scan.level, body: raw, note });
+  return { output, level: scan.level, flags: scan.flags, quarantined: false };
 }
 
 /** Cut a note to max characters. A fenced note is cut inside the fence so the closing line survives. */
