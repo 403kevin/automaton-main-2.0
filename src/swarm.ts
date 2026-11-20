@@ -41,6 +41,17 @@ import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
 import { modelReliabilityLines } from "./model-report.js";
 import {
+  agentSaidLines,
+  breachesLines,
+  claimsLines,
+  lostWakesLines,
+  moneyLines,
+  offersLines,
+  runtimeObservedLines,
+  sensesLines,
+  type ReportContext,
+} from "./report-v2.js";
+import {
   HOUR_MS,
   insertPrediction,
   openCount,
@@ -1523,7 +1534,23 @@ export class Swarm {
     }
     lines.push("");
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));
+    const context: ReportContext = {
+      db: this.db,
+      now,
+      since,
+      agents: alive.map((agent) => ({ id: agent.id, name: agent.name, tier: tierFor(agent.balanceUnits, this.config), balanceUnits: agent.balanceUnits })),
+      names,
+      agentCapUnits: this.config.agentDailyCapUnits,
+      globalCapUnits: this.config.globalDailyCapUnits,
+    };
+    lines.push(...runtimeObservedLines(context));
+    lines.push(...agentSaidLines(context));
+    lines.push(...claimsLines(context));
     lines.push(...refusalReportLines(this.db, since, names));
+    lines.push(...offersLines(context));
+    lines.push(...moneyLines(context));
+    lines.push(...sensesLines(context));
+    lines.push(...lostWakesLines(context));
     lines.push(
       ...modelReliabilityLines(
         this.db,
@@ -1533,6 +1560,7 @@ export class Swarm {
       ),
     );
     lines.push(...predictionReportLines(this.db, since, names));
+    lines.push(...breachesLines(context));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
