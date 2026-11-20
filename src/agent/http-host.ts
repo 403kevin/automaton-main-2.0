@@ -27,6 +27,11 @@ export class HttpHost implements AgentHost {
     await this.request("POST", "/turn", { text });
   }
 
+  async recordRefusal(agentId: string, tool: string, rule: string, reason: string): Promise<void> {
+    void agentId;
+    await this.request("POST", "/refusal", { tool, rule, reason });
+  }
+
   private async request(method: string, suffix: string, body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.baseUrl}/internal/agents/${this.agentId}${suffix}`, {
       method,

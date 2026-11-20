@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS endpoints (
   last_test_output TEXT,
   last_test_at INTEGER,
   test_failures INTEGER DEFAULT 0,
+  sample_query TEXT,
   PRIMARY KEY (agent_id, name)
 );
 
@@ -152,6 +153,18 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 
 CREATE INDEX IF NOT EXISTS facts_agent ON facts(agent_id, id);
+
+CREATE TABLE IF NOT EXISTS refusals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  tool TEXT NOT NULL,
+  rule_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  source TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS refusals_agent_time ON refusals(agent_id, created_at);
 CREATE INDEX IF NOT EXISTS ledger_agent ON ledger_entries(agent_id);
 CREATE INDEX IF NOT EXISTS spend_day ON spend(day, agent_id);
 `;
@@ -177,6 +190,7 @@ function ensureEndpointColumns(db: DatabaseSync): void {
     ["last_test_output", "TEXT"],
     ["last_test_at", "INTEGER"],
     ["test_failures", "INTEGER DEFAULT 0"],
+    ["sample_query", "TEXT"],
   ];
   for (const [name, type] of wanted) {
     if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE endpoints ADD COLUMN ${name} ${type}`);
@@ -379,10 +393,24 @@ interface EndpointRow {
   last_test_output: string | null;
   last_test_at: number | null;
   test_failures: number | null;
+  sample_query: string | null;
 }
 
 const ENDPOINT_COLUMNS =
-  "name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures";
+  "name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures, sample_query";
+
+function parseSampleQuery(text: string | null): Record<string, string> {
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const query: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) if (typeof value === "string") query[key] = value;
+    return query;
+  } catch {
+    return {};
+  }
+}
 
 function endpointFromRow(row: EndpointRow): ServedEndpoint {
   return {
@@ -394,6 +422,7 @@ function endpointFromRow(row: EndpointRow): ServedEndpoint {
     lastTestOutput: row.last_test_output,
     lastTestAt: row.last_test_at,
     testFailures: row.test_failures ?? 0,
+    sampleQuery: parseSampleQuery(row.sample_query),
   };
 }
 

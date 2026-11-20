@@ -35,12 +35,27 @@ import { classifyPayer, type PayerClass } from "./payer.js";
 import { mutateLineage, NAME_PATTERN } from "./replication.js";
 import type { SearchProvider } from "./search.js";
 import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
-import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
+import { HttpSensesClient, SensesRequestError, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
 import { guardSenseText, sanitizeSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
-import { checkOfferLinks, type OfferVerifier, type UrlChecker } from "./verify-offer.js";
+import { checkOfferLinks, ownLinkNames, outsideUrls, type OfferVerifier, type UrlChecker } from "./verify-offer.js";
+import {
+  AGENT_REFUSAL_HOURLY_MAX,
+  asLocalRuleId,
+  asRuleId,
+  cleanAgentTool,
+  countAgentReported,
+  countRuntimeRefusals,
+  insertRefusal,
+  OFFER_CHECK_RULES,
+  REFUSAL_WINDOW_MS,
+  refusalReportLines,
+  ruleForLaw,
+  type RefusalResult,
+  type RuleId,
+} from "./refusals.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, ServedEndpoint, SpendCategory, ToolCall } from "./types.js";
 import { rateLimitCounts } from "./http.js";
@@ -89,7 +104,10 @@ export interface AgentRuntime {
  * What a sense tool method returns to senseCall. rawPath (relative to DATA_DIR) says where the tool saved its raw JSON;
  * senseCall stores it in the evidence row and never passes it on to the agent.
  */
-type SenseOutcome = { ok: true; handled: boolean; output?: string; rawPath?: string } | { ok: false; reason: string };
+type SenseOutcome = { ok: true; handled: boolean; output?: string; rawPath?: string } | RefusalResult;
+
+/** What handleTool returns: a result, or a refusal that carries its rule ID. */
+type ToolResult = { ok: true; handled: boolean; output?: string } | RefusalResult;
 
 /** The most body bytes fetch_url reads from a page, and the most characters it hands on. */
 const FETCH_URL_MAX_BYTES = 100_000;
@@ -366,8 +384,8 @@ export class Swarm {
 
   authorize(agentId: string, units: number, category: SpendCategory): Result<{ balance: number }> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, error: "Unknown agent." };
-    if (agent.status === "archived") return { ok: false, error: "Agent is archived." };
+    if (!agent) return { ok: false, error: "Unknown agent.", rule: "agent_status" };
+    if (agent.status === "archived") return { ok: false, error: "Agent is archived.", rule: "agent_status" };
     const decision = checkSpend({
       amount: units,
       balance: agent.balanceUnits,
@@ -378,7 +396,7 @@ export class Swarm {
       killSwitch: this.killed,
       allowNegative: false,
     });
-    if (!decision.ok) return { ok: false, error: decision.reason ?? "Spend refused." };
+    if (!decision.ok) return { ok: false, error: decision.reason ?? "Spend refused.", rule: decision.rule };
     return { ok: true, value: { balance: agent.balanceUnits } };
   }
 
@@ -492,22 +510,55 @@ export class Swarm {
     this.db.prepare("UPDATE agents SET last_action = ? WHERE id = ?").run(content, agentId);
   }
 
-  async handleTool(agentId: string, call: ToolCall): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  /**
+   * The one place a tool call can be refused. Every refusal path returns its rule ID with its reason; this writes exactly
+   * one refusals row for each (a path that forgot its rule is recorded as unclassified, never skipped). A success and
+   * the balance tool write nothing. Existing events are written where they always were.
+   */
+  async handleTool(agentId: string, call: ToolCall): Promise<ToolResult> {
+    const result = await this.handleToolInner(agentId, call);
+    if (result.ok) return result;
+    const rule = result.rule ?? "unclassified";
+    insertRefusal(this.db, { agentId, tool: call.name, rule, reason: result.reason, source: "runtime", now: this.clock.now() });
+    return { ...result, rule };
+  }
+
+  /** A refusal reported by the agent's own process (it could send anything, so little of it is trusted). Never throws. */
+  recordAgentRefusal(agentId: string, tool: unknown, rule: unknown, reason: unknown): void {
+    if (!getAgent(this.db, agentId)) return;
+    const now = this.clock.now();
+    if (countAgentReported(this.db, agentId, now - REFUSAL_WINDOW_MS) >= AGENT_REFUSAL_HOURLY_MAX) return;
+    insertRefusal(this.db, {
+      agentId,
+      tool: cleanAgentTool(tool),
+      rule: asLocalRuleId(rule),
+      reason: typeof reason === "string" ? reason : "",
+      source: "agent",
+      now,
+    });
+  }
+
+  /** The two offer-gate ports, so a test can check that the app wired the real ones. */
+  offerPorts(): { verifier: OfferVerifier | undefined; urlChecker: UrlChecker | undefined } {
+    return { verifier: this.offerVerifier, urlChecker: this.urlChecker };
+  }
+
+  private async handleToolInner(agentId: string, call: ToolCall): Promise<ToolResult> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     if (call.name === "balance") {
       const snap = this.snapshot(agentId);
       return { ok: true, handled: true, output: `${snap.balance} | tier ${snap.tier} | status ${snap.status} | rent ${formatUsd(snap.rentUnits)}` };
     }
-    if (this.killed) return { ok: false, reason: "Global kill switch is on." };
-    if (agent.status !== "running") return { ok: false, reason: `Agent status is ${agent.status}. No tools.` };
+    if (this.killed) return { ok: false, reason: "Global kill switch is on.", rule: "kill_switch" };
+    if (agent.status !== "running") return { ok: false, reason: `Agent status is ${agent.status}. No tools.`, rule: "agent_status" };
     const args = call.arguments ?? {};
     if (call.name === "remember") {
       const note = String(args.note ?? "");
       const review = reviewText(note);
-      if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       const charged = this.chargeTool(agentId, "remember", call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (!charged.ok) return this.ledgerRefusal(charged);
       const notes = `${agent.strategyNotes}\n${note}`.trim().slice(0, 8000);
       this.db.prepare("UPDATE agents SET strategy_notes = ? WHERE id = ?").run(notes, agentId);
       return { ok: true, handled: true, output: "Noted." };
@@ -516,25 +567,25 @@ export class Swarm {
       const description = String(args.description ?? "");
       const body = String(args.body ?? "");
       const review = reviewText(`${description}\n${body}`);
-      if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       if (body.trim() === "") {
         this.event(agentId, "offer_service", "outcome=refused cost=0 body is empty");
-        return { ok: false, reason: "An offer needs a body: the text a buyer receives." };
+        return { ok: false, reason: "An offer needs a body: the text a buyer receives.", rule: "offer.body_empty" };
       }
       const linkProblem = await this.linkProblem(agentId, `${description}\n${body}`);
       if (linkProblem) {
-        this.event(agentId, "offer_service", `outcome=refused cost=0 ${linkProblem}`);
-        return { ok: false, reason: linkProblem };
+        this.event(agentId, "offer_service", `outcome=refused cost=0 ${linkProblem.reason}`);
+        return linkProblem;
       }
       let price = 0;
       try {
         price = (await import("./money.js")).parseUsd(String(args.priceUsd ?? ""));
       } catch (error) {
-        return { ok: false, reason: error instanceof Error ? error.message : "Bad price." };
+        return { ok: false, reason: error instanceof Error ? error.message : "Bad price.", rule: "offer.price" };
       }
-      if (price <= 0) return { ok: false, reason: "Price must be positive." };
+      if (price <= 0) return { ok: false, reason: "Price must be positive.", rule: "offer.price" };
       const charged = this.chargeTool(agentId, "offer_service", call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (!charged.ok) return this.ledgerRefusal(charged);
       this.db
         .prepare(
           `INSERT INTO services (agent_id, price_units, description, body, updated_at)
@@ -548,58 +599,62 @@ export class Swarm {
     if (call.name === "serve_endpoint") return this.serveEndpoint(agentId, call);
     if (call.name === "spawn_child") {
       const spawned = await this.spawnChild(agentId, String(args.name ?? ""));
-      if (!spawned.ok) return { ok: false, reason: spawned.error };
+      if (!spawned.ok) return this.fromResult(spawned, "spawn.refused");
       return { ok: true, handled: true, output: `Child ${spawned.value.name} is alive at ${spawned.value.address}.` };
     }
     if (call.name === "council") {
-      if (!this.councilRunner) return { ok: false, reason: "Council is not configured." };
+      if (!this.councilRunner) return { ok: false, reason: "Council is not configured.", rule: "tool.unconfigured" };
       const question = String(args.question ?? "");
       const review = reviewText(question);
-      if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       const answer = await this.councilRunner(agentId, question);
-      if (!answer.ok) return { ok: false, reason: answer.error };
+      if (!answer.ok) return this.fromResult(answer, "council.refused");
       return { ok: true, handled: true, output: answer.value };
     }
     if (call.name === "pay_request") {
       const paid = await this.payRequest(agentId, String(args.url ?? ""), String(args.maxUsd ?? "0"));
-      if (!paid.ok) return { ok: false, reason: paid.error };
+      if (!paid.ok) return this.fromResult(paid, "pay.refused");
       return { ok: true, handled: true, output: paid.value };
     }
     if (call.name === "shell") {
       const command = String(args.command ?? "");
       const review = reviewCommand(command);
-      if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       const charged = this.chargeTool(agentId, "shell", call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (!charged.ok) return this.ledgerRefusal(charged);
       return { ok: true, handled: false };
     }
     if (call.name === "pay_request_fetch") {
       const review = await reviewUrl(String(args.url ?? ""), this.config.denyHosts, this.resolveHost);
-      if (!review.allowed) return this.blocked(agentId, review.reason);
+      if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       const charged = this.chargeTool(agentId, "fetch_url", call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (!charged.ok) return this.ledgerRefusal(charged);
       return { ok: true, handled: false };
     }
     if (call.name === "read_file" || call.name === "write_file") {
       const target = String(args.path ?? "");
       const kind = classifyAgentPath(target);
-      if (kind === "deny") return this.blocked(agentId, "Paths must stay inside the workspace.");
-      if (kind === "ref" && call.name === "write_file") return this.blocked(agentId, "Reference files are read-only.");
+      if (kind === "deny") return this.blocked(agentId, "Paths must stay inside the workspace.", "local.path");
+      if (kind === "ref" && call.name === "write_file") return this.blocked(agentId, "Reference files are read-only.", "local.path");
       if (call.name === "write_file") {
         const review = reviewText(String(args.content ?? ""));
-        if (!review.allowed) return this.blocked(agentId, review.reason);
+        if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       }
       const charged = this.chargeTool(agentId, call.name, call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
+      if (!charged.ok) return this.ledgerRefusal(charged);
       return { ok: true, handled: false };
     }
     if ((SENSE_TOOLS as readonly string[]).includes(call.name)) return this.senseCall(agentId, call);
     if (call.name === "claim") return this.claimTool(agentId, call);
     if (call.name === "report_income" || call.name === "credit_balance" || call.name === "claim_payment") {
       this.rejectClaim(agentId, `Tool ${call.name} tried to declare income.`);
-      return { ok: false, reason: "Claims are not income. Only an on-chain transfer or an owner top-up credits the ledger." };
+      return {
+        ok: false,
+        reason: "Claims are not income. Only an on-chain transfer or an owner top-up credits the ledger.",
+        rule: "income.self_declared",
+      };
     }
-    return { ok: false, reason: `Unknown tool ${call.name}.` };
+    return { ok: false, reason: `Unknown tool ${call.name}.`, rule: "unknown_tool" };
   }
 
   async settleDryPayment(sellerId: string, header: string): Promise<Result<{ body: string; txHash?: string }>> {
@@ -831,44 +886,44 @@ export class Swarm {
   private async publishPage(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<ToolResult> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const slug = String(call.arguments?.slug ?? "").trim();
     const markdown = String(call.arguments?.markdown ?? "");
     if (!isPublicSlug(slug)) {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug.slice(0, 40)} cost=0`);
-      return { ok: false, reason: "slug must be 1-40 characters of lowercase letters, numbers, or dashes." };
+      return { ok: false, reason: "slug must be 1-40 characters of lowercase letters, numbers, or dashes.", rule: "input.invalid" };
     }
     if (Buffer.byteLength(markdown, "utf8") > MAX_PAGE_BYTES) {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
-      return { ok: false, reason: "Page is larger than 200 KB." };
+      return { ok: false, reason: "Page is larger than 200 KB.", rule: "input.invalid" };
     }
     if (markdown.trim() === "") {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
-      return { ok: false, reason: "Page is empty." };
+      return { ok: false, reason: "Page is empty.", rule: "input.invalid" };
     }
     const review = reviewText(markdown);
-    if (!review.allowed) return this.blocked(agentId, `Law ${review.law}: ${review.reason}`);
+    if (!review.allowed) return this.blocked(agentId, `Law ${review.law}: ${review.reason}`, ruleForLaw(review.law));
     if (getEndpoint(this.db, agentId, slug)) {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
-      return { ok: false, reason: "That name is already a paid endpoint." };
+      return { ok: false, reason: "That name is already a paid endpoint.", rule: "input.conflict" };
     }
     const existing = getPage(this.db, agentId, slug);
     if (!existing && countPages(this.db, agentId) >= MAX_PAGES_PER_AGENT) {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
-      return { ok: false, reason: `Page cap is ${MAX_PAGES_PER_AGENT}.` };
+      return { ok: false, reason: `Page cap is ${MAX_PAGES_PER_AGENT}.`, rule: "offer.cap" };
     }
     const linkProblem = await this.linkProblem(agentId, markdown);
     if (linkProblem) {
-      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0 ${linkProblem}`);
-      return { ok: false, reason: linkProblem };
+      this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0 ${linkProblem.reason}`);
+      return linkProblem;
     }
     const cost = this.config.publishPagePriceUnits;
     if (cost > 0) {
       const charged = this.debit(agentId, cost, "tool", `tool:${call.id}`, "publish_page");
-      if (!charged.ok) return { ok: false, reason: charged.error };
-      if (charged.value.duplicate) return { ok: false, reason: "publish_page call was already billed." };
+      if (!charged.ok) return this.ledgerRefusal(charged);
+      if (charged.value.duplicate) return { ok: false, reason: "publish_page call was already billed.", rule: "ledger.duplicate" };
     }
     try {
       this.db
@@ -881,7 +936,7 @@ export class Swarm {
     } catch (error) {
       this.refundTool(agentId, cost, `refund:publish:${call.id}`, "publish_page refund");
       const reason = error instanceof Error ? error.message : "Could not save the page.";
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "tool.failed" };
     }
     const bytes = Buffer.byteLength(markdown, "utf8");
     this.event(agentId, "publish_page", `outcome=ok slug=${slug} bytes=${bytes} cost=${cost}`);
@@ -891,46 +946,51 @@ export class Swarm {
   private async serveEndpoint(
     agentId: string,
     call: ToolCall,
-  ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }> {
+  ): Promise<ToolResult> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const name = String(call.arguments?.name ?? "").trim();
     const handlerDir = String(call.arguments?.handler_dir ?? call.arguments?.handlerDir ?? "").trim();
     if (!isPublicSlug(name)) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name.slice(0, 40)} cost=0`);
-      return { ok: false, reason: "name must be 1-40 characters of lowercase letters, numbers, or dashes." };
+      return { ok: false, reason: "name must be 1-40 characters of lowercase letters, numbers, or dashes.", rule: "input.invalid" };
     }
     if (!isPublicSlug(handlerDir)) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: "handler_dir must be one directory name of 1-40 lowercase letters, numbers, or dashes." };
+      return {
+        ok: false,
+        reason: "handler_dir must be one directory name of 1-40 lowercase letters, numbers, or dashes.",
+        rule: "input.invalid",
+      };
     }
     let price = 0;
     try {
       price = (await import("./money.js")).parseUsd(String(call.arguments?.price_usd ?? call.arguments?.priceUsd ?? ""));
     } catch (error) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: error instanceof Error ? error.message : "Bad price." };
+      return { ok: false, reason: error instanceof Error ? error.message : "Bad price.", rule: "offer.price" };
     }
     if (price < this.config.serveMinPriceUnits || price > this.config.serveMaxPriceUnits) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} price=${price} cost=0`);
       return {
         ok: false,
         reason: `price_usd must be from ${formatUsd(this.config.serveMinPriceUnits)} to ${formatUsd(this.config.serveMaxPriceUnits)}.`,
+        rule: "offer.price",
       };
     }
     if (getPage(this.db, agentId, name)) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: "That name is already a published page." };
+      return { ok: false, reason: "That name is already a published page.", rule: "input.conflict" };
     }
     const existing = getEndpoint(this.db, agentId, name);
     if (!existing && countEndpoints(this.db, agentId) >= MAX_ENDPOINTS_PER_AGENT) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: `Endpoint cap is ${MAX_ENDPOINTS_PER_AGENT}.` };
+      return { ok: false, reason: `Endpoint cap is ${MAX_ENDPOINTS_PER_AGENT}.`, rule: "offer.cap" };
     }
     const sample = readSampleQuery(call.arguments?.sample_query);
     if (!sample.ok) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: sample.error };
+      return { ok: false, reason: sample.error, rule: "input.invalid" };
     }
     const snap = snapshotHandlerDir({
       workspace: agent.workspace,
@@ -939,33 +999,48 @@ export class Swarm {
     });
     if (!snap.ok) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
-      return { ok: false, reason: snap.error };
+      return { ok: false, reason: snap.error, rule: "offer.handler" };
     }
-    // The gate: run the handler once before anything is charged or registered. A refusal here is free.
+    // The gate: run the handler once before anything is charged or registered. A refusal here is free, so the
+    // number of refused attempts an agent may make per hour is capped (before the sandbox is touched).
+    const capped = this.offerCheckCapped(agentId);
+    if (capped) {
+      this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0 offer check limit`);
+      return capped;
+    }
     const tested = await this.runOfferTest(agentId, name, snap.hash, sample.query);
     if (!tested.ok) {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0 test=${tested.code}`);
-      return { ok: false, reason: tested.reason };
+      return { ok: false, reason: tested.reason, rule: tested.code === "unconfigured" ? "offer.unconfigured" : "offer.test_failed" };
     }
     const cost = this.config.serveEndpointPriceUnits;
     if (cost > 0) {
       const charged = this.debit(agentId, cost, "tool", `tool:${call.id}`, "serve_endpoint");
-      if (!charged.ok) return { ok: false, reason: charged.error };
-      if (charged.value.duplicate) return { ok: false, reason: "serve_endpoint call was already billed." };
+      if (!charged.ok) return this.ledgerRefusal(charged);
+      if (charged.value.duplicate) return { ok: false, reason: "serve_endpoint call was already billed.", rule: "ledger.duplicate" };
     }
     try {
       this.db
         .prepare(
-          `INSERT INTO endpoints (agent_id, name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures)
-           VALUES (?, ?, ?, ?, ?, 'live', ?, ?, 0)
+          `INSERT INTO endpoints (agent_id, name, price_units, snapshot_hash, updated_at, status, last_test_output, last_test_at, test_failures, sample_query)
+           VALUES (?, ?, ?, ?, ?, 'live', ?, ?, 0, ?)
            ON CONFLICT(agent_id, name) DO UPDATE SET price_units = excluded.price_units, snapshot_hash = excluded.snapshot_hash, updated_at = excluded.updated_at,
-             status = 'live', last_test_output = excluded.last_test_output, last_test_at = excluded.last_test_at, test_failures = 0`,
+             status = 'live', last_test_output = excluded.last_test_output, last_test_at = excluded.last_test_at, test_failures = 0, sample_query = excluded.sample_query`,
         )
-        .run(agentId, name, price, snap.hash, this.clock.now(), tested.preview, this.clock.now());
+        .run(
+          agentId,
+          name,
+          price,
+          snap.hash,
+          this.clock.now(),
+          tested.preview,
+          this.clock.now(),
+          Object.keys(sample.query).length > 0 ? JSON.stringify(sample.query) : null,
+        );
     } catch (error) {
       this.refundTool(agentId, cost, `refund:serve:${call.id}`, "serve_endpoint refund");
       const reason = error instanceof Error ? error.message : "Could not register the endpoint.";
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "tool.failed" };
     }
     this.event(agentId, "serve_endpoint", `outcome=ok endpoint=${name} price=${price} snapshot=${snap.hash} cost=${cost}`);
     return {
@@ -976,14 +1051,40 @@ export class Swarm {
   }
 
   /** A reason to refuse this text (a dead outside URL, or a link to the agent's own missing page), or null. */
-  private async linkProblem(agentId: string, text: string): Promise<string | null> {
+  private async linkProblem(agentId: string, text: string): Promise<RefusalResult | null> {
+    // Text with no link to check costs nothing and is not capped.
+    if (ownLinkNames(text, agentId).length === 0 && outsideUrls(text, agentId).length === 0) return null;
+    const capped = this.offerCheckCapped(agentId);
+    if (capped) return capped;
     const checked = await checkOfferLinks({
       text,
       agentId,
       nameExists: (name) => Boolean(getEndpoint(this.db, agentId, name) ?? getPage(this.db, agentId, name)),
       checker: this.urlChecker,
     });
-    return checked.ok ? null : checked.reason;
+    if (checked.ok) return null;
+    const rule: RuleId = checked.code === "own_missing" ? "offer.link_own_missing" : checked.code === "dead" ? "offer.link_dead" : "offer.unconfigured";
+    return { ok: false, reason: checked.reason, rule };
+  }
+
+  /**
+   * Free gate attempts are capped per agent per hour: the refused endpoint tests plus the refused link checks, counted
+   * from the refusals table. At the cap the call is refused before any sandbox run or URL check. The limit refusal is
+   * not one of the counted rules, so it does not extend its own lockout.
+   */
+  private offerCheckCapped(agentId: string): RefusalResult | null {
+    const used = countRuntimeRefusals(this.db, agentId, OFFER_CHECK_RULES, this.clock.now() - REFUSAL_WINDOW_MS);
+    if (used < this.config.offerCheckHourlyLimit) return null;
+    return { ok: false, reason: `offer check hourly limit is ${this.config.offerCheckHourlyLimit}.`, rule: "limit.offer_checks" };
+  }
+
+  private ledgerRefusal(result: { error: string; rule?: string }): RefusalResult {
+    return this.fromResult(result, "unclassified");
+  }
+
+  /** A refusal from a Result error: a rule code that came with it wins, else the fallback for that tool. */
+  private fromResult(result: { error: string; rule?: string }, fallback: RuleId): RefusalResult {
+    return { ok: false, reason: result.error, rule: result.rule ? asRuleId(result.rule) : fallback };
   }
 
   /**
@@ -1049,7 +1150,7 @@ export class Swarm {
       for (const endpoint of listEndpointRows(this.db, agent.id)) {
         if (endpoint.status !== "live") continue;
         if (now - (endpoint.lastTestAt ?? endpoint.updatedAt) < this.config.offerRetestIntervalMs) continue;
-        const ran = await this.runHandlerTest(verifier, agent.id, endpoint.name, endpoint.snapshotHash, {});
+        const ran = await this.runHandlerTest(verifier, agent.id, endpoint.name, endpoint.snapshotHash, endpoint.sampleQuery);
         if (!ran) continue;
         if (ran.ok && ran.output.trim() !== "") {
           this.db
@@ -1315,6 +1416,7 @@ export class Swarm {
       lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${event.message}`);
     }
     lines.push("");
+    lines.push(...refusalReportLines(this.db, since, new Map(agents.map((agent) => [agent.id, agent.name]))));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
@@ -1422,25 +1524,31 @@ export class Swarm {
    * tripwires, evidence ids, then the fee. Nothing is charged or stored until every check passes. A rejected claim is
    * logged as claim_rejected, which counts toward the hourly limit; a limit refusal is logged as claim_limit, which does not.
    */
-  private claimTool(agentId: string, call: ToolCall): { ok: true; handled: boolean; output?: string } | { ok: false; reason: string } {
+  private claimTool(agentId: string, call: ToolCall): ToolResult {
     const args = call.arguments ?? {};
     const now = this.clock.now();
     if (claimAttempts(this.db, agentId, now - 3_600_000) >= this.config.claimHourlyLimit) {
       const reason = `claim hourly limit is ${this.config.claimHourlyLimit}.`;
       this.event(agentId, "claim_limit", reason);
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "limit.hourly.claim" };
     }
     const checked = checkClaim(this.db, agentId, args.statement, args.evidence_ids);
-    if (!checked.ok) return this.refuseClaim(agentId, checked.reason);
+    if (!checked.ok) {
+      // A claim the constitution refused is a constitution block too (it also counts toward the claim limit below).
+      if (checked.rule.startsWith("constitution.") || checked.rule === "owner.denylist") {
+        this.event(agentId, "constitution_block", checked.reason);
+      }
+      return this.refuseClaim(agentId, checked.reason, checked.rule);
+    }
     const charged = this.chargeTool(agentId, "claim", call.id);
-    if (!charged.ok) return this.refuseClaim(agentId, charged.error);
+    if (!charged.ok) return this.refuseClaim(agentId, charged.error, asRuleId(charged.rule));
     const id = insertClaim(this.db, agentId, checked.draft, now);
     return { ok: true, handled: true, output: `Claim ${id} stored as ${checked.draft.status}.` };
   }
 
-  private refuseClaim(agentId: string, reason: string): { ok: false; reason: string } {
+  private refuseClaim(agentId: string, reason: string, rule: RuleId): RefusalResult {
     this.event(agentId, "claim_rejected", reason);
-    return { ok: false, reason };
+    return { ok: false, reason, rule };
   }
 
   /**
@@ -1449,16 +1557,16 @@ export class Swarm {
    */
   private async webSearch(agentId: string, call: ToolCall): Promise<SenseOutcome> {
     const query = String(call.arguments?.query ?? "").trim().slice(0, 300);
-    if (!query) return { ok: false, reason: "Query is empty." };
+    if (!query) return { ok: false, reason: "Query is empty.", rule: "input.invalid" };
     const charged = this.chargeTool(agentId, "web_search", call.id);
-    if (!charged.ok) return { ok: false, reason: charged.error };
+    if (!charged.ok) return this.ledgerRefusal(charged);
     try {
       const hits = await this.search.search(query);
       const output = hits.map((hit) => `${hit.title}\n${hit.url}\n${hit.snippet}`).join("\n\n") || "No results.";
       return { ok: true, handled: true, output: output.slice(0, 4000) };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "Search failed.";
-      return { ok: false, reason: reason.slice(0, 300) };
+      return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -1470,16 +1578,16 @@ export class Swarm {
   private async fetchUrl(agentId: string, call: ToolCall): Promise<SenseOutcome> {
     const url = String(call.arguments?.url ?? "").trim();
     const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
-    if (!review.allowed) return this.blocked(agentId, review.reason);
+    if (!review.allowed) return this.blocked(agentId, review.reason, ruleForLaw(review.law));
     const charged = this.chargeTool(agentId, "fetch_url", call.id);
-    if (!charged.ok) return { ok: false, reason: charged.error };
+    if (!charged.ok) return this.ledgerRefusal(charged);
     try {
       const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(FETCH_URL_TIMEOUT_MS) });
       const text = await readBodyCapped(response, FETCH_URL_MAX_BYTES);
       return { ok: true, handled: true, output: `HTTP ${response.status}\n${text.slice(0, FETCH_URL_MAX_CHARS)}` };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "fetch_url failed.";
-      return { ok: false, reason: `fetch_url failed: ${reason}`.slice(0, 300) };
+      return { ok: false, reason: `fetch_url failed: ${reason}`.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -1576,23 +1684,23 @@ export class Swarm {
     call: ToolCall,
   ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const url = String(call.arguments?.url ?? "").trim();
     const screenshot = call.arguments?.screenshot === true || call.arguments?.screenshot === "true";
     const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
     if (!review.allowed) {
       this.noteSee(agentId, url, 0, "refused");
-      return this.blocked(agentId, review.reason);
+      return this.blocked(agentId, review.reason, ruleForLaw(review.law));
     }
     if (this.seePageUses(agentId) >= this.config.seePageHourlyLimit) {
       const reason = `see_page hourly limit is ${this.config.seePageHourlyLimit}.`;
       this.noteSee(agentId, url, 0, "limit");
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "limit.hourly.see_page" };
     }
     const cost = this.config.seePagePriceUnits + (screenshot ? this.config.seePageScreenshotPriceUnits : 0);
     const debited = this.debit(agentId, cost, "tool", `tool:${call.id}`, "see_page");
-    if (!debited.ok) return { ok: false, reason: debited.error };
-    if (debited.value.duplicate) return { ok: false, reason: "see_page call was already billed." };
+    if (!debited.ok) return this.ledgerRefusal(debited);
+    if (debited.value.duplicate) return { ok: false, reason: "see_page call was already billed.", rule: "ledger.duplicate" };
     const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
     try {
       const page = await this.sensesClient.see({ url, screenshot, denyHosts });
@@ -1602,7 +1710,7 @@ export class Swarm {
         if (!saved.ok) {
           this.refundSee(agentId, cost, call.id);
           this.noteSee(agentId, url, 0, "error");
-          return { ok: false, reason: saved.error };
+          return { ok: false, reason: saved.error, rule: "tool.failed" };
         }
         evidence = saved.path;
       }
@@ -1615,7 +1723,7 @@ export class Swarm {
       this.refundSee(agentId, cost, call.id);
       this.noteSee(agentId, url, 0, "error");
       const reason = error instanceof Error ? error.message : "see_page failed.";
-      return { ok: false, reason: reason.slice(0, 300) };
+      return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -1670,33 +1778,33 @@ export class Swarm {
     call: ToolCall,
   ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const url = String(call.arguments?.url ?? "").trim();
     const maxPages = this.readCrawlPages(call.arguments?.max_pages);
     const sameDomain = call.arguments?.same_domain !== false && call.arguments?.same_domain !== "false";
     const review = await reviewUrl(url, this.config.denyHosts, this.resolveHost);
     if (!review.allowed) {
       this.noteCrawl(agentId, url, 0, 0, 0, "refused");
-      return this.blocked(agentId, review.reason);
+      return this.blocked(agentId, review.reason, ruleForLaw(review.law));
     }
     if (this.crawlUses(agentId) >= this.config.crawlHourlyLimit) {
       const reason = `crawl_site hourly limit is ${this.config.crawlHourlyLimit}.`;
       this.noteCrawl(agentId, url, 0, 0, 0, "limit");
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "limit.hourly.crawl_site" };
     }
     const price = this.config.crawlPagePriceUnits;
     const hold = maxPages * price;
     const reserved = this.authorize(agentId, hold, "tool");
     if (!reserved.ok) {
       this.noteCrawl(agentId, url, 0, 0, 0, "unaffordable");
-      return { ok: false, reason: reserved.error };
+      return this.ledgerRefusal(reserved);
     }
     const debited = this.debit(agentId, hold, "tool", `tool:${call.id}`, "crawl_site");
     if (!debited.ok) {
       this.noteCrawl(agentId, url, 0, 0, 0, "unaffordable");
-      return { ok: false, reason: debited.error };
+      return this.ledgerRefusal(debited);
     }
-    if (debited.value.duplicate) return { ok: false, reason: "crawl_site call was already billed." };
+    if (debited.value.duplicate) return { ok: false, reason: "crawl_site call was already billed.", rule: "ledger.duplicate" };
     const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
     try {
       const crawl = await this.sensesClient.crawl({ url, maxPages, sameDomain, denyHosts });
@@ -1708,7 +1816,7 @@ export class Swarm {
       if (!saved.ok) {
         if (cost > 0) this.refundCrawl(agentId, cost, `${call.id}:save`);
         this.noteCrawl(agentId, url, 0, crawl.skipped.length, 0, "error");
-        return { ok: false, reason: saved.error };
+        return { ok: false, reason: saved.error, rule: "tool.failed" };
       }
       this.noteCrawl(agentId, url, fetched, crawl.skipped.length, cost, "ok", saved.path);
       return { ok: true, handled: true, output: presentCrawl(crawl), rawPath: saved.path };
@@ -1716,7 +1824,7 @@ export class Swarm {
       this.refundCrawl(agentId, hold, call.id);
       this.noteCrawl(agentId, url, 0, 0, 0, "error");
       const reason = error instanceof Error ? error.message : "crawl_site failed.";
-      return { ok: false, reason: reason.slice(0, 300) };
+      return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -1762,34 +1870,34 @@ export class Swarm {
     call: ToolCall,
   ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const source = String(call.arguments?.source ?? "").trim().toLowerCase();
     const query = String(call.arguments?.query ?? "").trim();
     const options = readFeedOptions(call.arguments?.options);
     if (!(FEED_SOURCE_NAMES as readonly string[]).includes(source)) {
       this.noteFeed(agentId, source, query, 0, 0, "refused");
-      return { ok: false, reason: "unknown source" };
+      return { ok: false, reason: "unknown source", rule: "input.invalid" };
     }
     if (!query || query.length > 2_000) {
       this.noteFeed(agentId, source, query, 0, 0, "refused");
-      return { ok: false, reason: query ? "query is too long." : "query is required." };
+      return { ok: false, reason: query ? "query is too long." : "query is required.", rule: "input.invalid" };
     }
     if (source === "rss") {
       const review = await reviewUrl(query, this.config.denyHosts, this.resolveHost);
       if (!review.allowed) {
         this.noteFeed(agentId, source, query, 0, 0, "refused");
-        return this.blocked(agentId, review.reason);
+        return this.blocked(agentId, review.reason, ruleForLaw(review.law));
       }
     }
     if (this.feedUses(agentId) >= this.config.readFeedHourlyLimit) {
       const reason = `read_feed hourly limit is ${this.config.readFeedHourlyLimit}.`;
       this.noteFeed(agentId, source, query, 0, 0, "limit");
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "limit.hourly.read_feed" };
     }
     const cost = this.config.readFeedPriceUnits;
     const debited = this.debit(agentId, cost, "tool", `tool:${call.id}`, "read_feed");
-    if (!debited.ok) return { ok: false, reason: debited.error };
-    if (debited.value.duplicate) return { ok: false, reason: "read_feed call was already billed." };
+    if (!debited.ok) return this.ledgerRefusal(debited);
+    if (debited.value.duplicate) return { ok: false, reason: "read_feed call was already billed.", rule: "ledger.duplicate" };
     const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
     try {
       const result = await this.sensesClient.feed({
@@ -1809,7 +1917,7 @@ export class Swarm {
       if (!saved.ok) {
         this.refundFeed(agentId, cost, call.id);
         this.noteFeed(agentId, source, query, 0, 0, "error");
-        return { ok: false, reason: saved.error };
+        return { ok: false, reason: saved.error, rule: "tool.failed" };
       }
       const outcome = result.unavailable ? "unavailable" : "ok";
       this.noteFeed(agentId, source, query, result.items.length, cost, outcome, saved.path);
@@ -1818,7 +1926,7 @@ export class Swarm {
       this.refundFeed(agentId, cost, call.id);
       this.noteFeed(agentId, source, query, 0, 0, "error");
       const reason = error instanceof Error ? error.message : "read_feed failed.";
-      return { ok: false, reason: reason.slice(0, 300) };
+      return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -1892,43 +2000,43 @@ export class Swarm {
     call: ToolCall,
   ): Promise<SenseOutcome> {
     const agent = getAgent(this.db, agentId);
-    if (!agent) return { ok: false, reason: "Unknown agent." };
+    if (!agent) return { ok: false, reason: "Unknown agent.", rule: "agent_status" };
     const task = String(call.arguments?.task ?? "").trim();
     if (!this.config.browseEnabled) {
       this.noteBrowse(agentId, task, 0, [], 0, "refused");
-      return { ok: false, reason: "browse is disabled by the owner" };
+      return { ok: false, reason: "browse is disabled by the owner", rule: "tool.disabled" };
     }
     if (!task || task.length > 4_000) {
       this.noteBrowse(agentId, task, 0, [], 0, "refused");
-      return { ok: false, reason: task ? "task is too long." : "task is required." };
+      return { ok: false, reason: task ? "task is too long." : "task is required.", rule: "input.invalid" };
     }
     const review = reviewText(task);
     if (!review.allowed) {
       this.noteBrowse(agentId, task, 0, [], 0, "refused");
-      return this.blocked(agentId, `Law ${review.law}: ${review.reason}`);
+      return this.blocked(agentId, `Law ${review.law}: ${review.reason}`, ruleForLaw(review.law));
     }
     const maxSteps = this.readBrowseSteps(call.arguments?.max_steps);
     if (this.browseUses(agentId) >= this.config.browseHourlyLimit) {
       const reason = `browse hourly limit is ${this.config.browseHourlyLimit}.`;
       this.noteBrowse(agentId, task, 0, [], 0, "limit");
-      return { ok: false, reason };
+      return { ok: false, reason, rule: "limit.hourly.browse" };
     }
     const preauth = maxSteps * this.config.browseStepPriceUnits + this.config.browseLlmReserveUnits;
     const reserved = this.authorize(agentId, preauth, "tool");
     if (!reserved.ok) {
       this.noteBrowse(agentId, task, 0, [], 0, "unaffordable");
-      return { ok: false, reason: reserved.error };
+      return this.ledgerRefusal(reserved);
     }
     if (!this.browseLlm) {
       this.noteBrowse(agentId, task, 0, [], 0, "refused");
-      return { ok: false, reason: "browse llm proxy is not configured." };
+      return { ok: false, reason: "browse llm proxy is not configured.", rule: "tool.unconfigured" };
     }
     const debited = preauth > 0 ? this.debit(agentId, preauth, "tool", `tool:${call.id}`, "browse") : { ok: true as const, value: { balance: agent.balanceUnits } };
     if (!debited.ok) {
       this.noteBrowse(agentId, task, 0, [], 0, "unaffordable");
-      return { ok: false, reason: debited.error };
+      return this.ledgerRefusal(debited);
     }
-    if (debited.value.duplicate) return { ok: false, reason: "browse call was already billed." };
+    if (debited.value.duplicate) return { ok: false, reason: "browse call was already billed.", rule: "ledger.duplicate" };
     const snapshot = this.snapshot(agentId);
     const token = this.browseLlm.issue({ agentId, model: snapshot.model, now: this.clock.now() });
     const denyHosts = [...new Set([...constitutionDenyHosts(), ...this.config.denyHosts])];
@@ -1953,7 +2061,7 @@ export class Swarm {
       if (!saved.ok) {
         if (actual > 0) this.refundBrowse(agentId, actual, `${call.id}:save`);
         this.noteBrowse(agentId, task, 0, result.urls, 0, "error");
-        return { ok: false, reason: saved.error };
+        return { ok: false, reason: saved.error, rule: "tool.failed" };
       }
       this.noteBrowse(agentId, task, steps, result.urls, actual, result.outcome || "ok", saved.path);
       const text = [result.result, result.urls.join("\n"), `steps ${steps}`, "Raw transcript stored outside your workspace."].filter((part) => part && part.trim()).join("\n\n");
@@ -1967,7 +2075,7 @@ export class Swarm {
       this.refundBrowse(agentId, preauth, call.id);
       this.noteBrowse(agentId, task, 0, [], 0, "error");
       const reason = error instanceof Error ? error.message : "browse failed.";
-      return { ok: false, reason: reason.slice(0, 300) };
+      return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
   }
 
@@ -2031,9 +2139,9 @@ export class Swarm {
     return this.debit(agentId, cost, "tool", `tool:${callId}`, name);
   }
 
-  private blocked(agentId: string, reason: string): { ok: false; reason: string } {
+  private blocked(agentId: string, reason: string, rule: RuleId): RefusalResult {
     this.event(agentId, "constitution_block", reason);
-    return { ok: false, reason };
+    return { ok: false, reason, rule };
   }
 
   private chargeRent(now: number): void {
@@ -2184,11 +2292,11 @@ export class Swarm {
       const agent = getAgent(this.db, input.agentId);
       if (!agent) {
         rollback();
-        return { ok: false, error: "Unknown agent." };
+        return { ok: false, error: "Unknown agent.", rule: "agent_status" };
       }
       if (agent.status === "archived") {
         rollback();
-        return { ok: false, error: "Agent is archived." };
+        return { ok: false, error: "Agent is archived.", rule: "agent_status" };
       }
       const existing = this.db
         .prepare("SELECT balance_after FROM ledger_entries WHERE agent_id = ? AND ref = ?")
@@ -2210,13 +2318,13 @@ export class Swarm {
         });
         if (!decision.ok) {
           rollback();
-          return { ok: false, error: decision.reason ?? "Spend refused." };
+          return { ok: false, error: decision.reason ?? "Spend refused.", rule: decision.rule };
         }
       }
       const next = agent.balanceUnits + input.amount;
       if (next < 0 && !input.allowNegative) {
         rollback();
-        return { ok: false, error: "Balance is too low." };
+        return { ok: false, error: "Balance is too low.", rule: "ledger.balance" };
       }
       const entryId = newId("led");
       this.db
@@ -2454,6 +2562,11 @@ function offerPreview(output: string): string {
   const cut = output.slice(0, OFFER_PREVIEW_MAX_CHARS);
   const guarded = guardSenseText("serve_endpoint", cut);
   return (guarded.quarantined ? guarded.output : sanitizeSenseText(cut)).slice(0, OFFER_PREVIEW_MAX_CHARS);
+}
+
+/** A senses call that the service refused (a SensesRequestError) is sense.refused; any other failure is sense.error. */
+function senseFailureRule(error: unknown): RuleId {
+  return error instanceof SensesRequestError ? "sense.refused" : "sense.error";
 }
 
 function sha256(value: string): string {

@@ -162,7 +162,7 @@ async function handle(
     return send(res, 404, { error: "Unknown admin route." });
   }
 
-  const internal = /^\/internal\/agents\/(a[a-f0-9]+)(\/snapshot|\/infer|\/tool|\/turn)$/.exec(path);
+  const internal = /^\/internal\/agents\/(a[a-f0-9]+)(\/snapshot|\/infer|\/tool|\/turn|\/refusal)$/.exec(path);
   if (internal) {
     const agentId = internal[1];
     const token = bearer(req);
@@ -185,6 +185,10 @@ async function handle(
     }
     if (req.method === "POST" && internal[2] === "/turn") {
       await host.recordTurn(agentId, String(body.text ?? ""));
+      return send(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && internal[2] === "/refusal") {
+      await host.recordRefusal(agentId, String(body.tool ?? ""), String(body.rule ?? ""), String(body.reason ?? ""));
       return send(res, 200, { ok: true });
     }
   }

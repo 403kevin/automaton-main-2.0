@@ -104,7 +104,9 @@ export function outsideUrls(text: string, agentId: string): string[] {
   return urls;
 }
 
-export type LinkCheck = { ok: true } | { ok: false; reason: string };
+export type LinkCheck =
+  | { ok: true }
+  | { ok: false; reason: string; code: "own_missing" | "dead" | "unconfigured" };
 
 /**
  * Refuse text that advertises something that is not there: a link to the agent's own /a/<id>/<name> with no endpoint or
@@ -119,15 +121,21 @@ export async function checkOfferLinks(input: {
 }): Promise<LinkCheck> {
   for (const name of ownLinkNames(input.text, input.agentId)) {
     if (!input.nameExists(name)) {
-      return { ok: false, reason: `The link /a/${input.agentId}/${name} points at nothing: no endpoint or page has that name.` };
+      return {
+        ok: false,
+        code: "own_missing",
+        reason: `The link /a/${input.agentId}/${name} points at nothing: no endpoint or page has that name.`,
+      };
     }
   }
   const urls = outsideUrls(input.text, input.agentId);
   if (urls.length === 0) return { ok: true };
-  if (!input.checker) return { ok: false, reason: "URL checks are not configured, so text with outside URLs is refused." };
+  if (!input.checker) {
+    return { ok: false, code: "unconfigured", reason: "URL checks are not configured, so text with outside URLs is refused." };
+  }
   for (const url of urls.slice(0, MAX_OUTSIDE_URLS_CHECKED)) {
     const outcome = await input.checker.check(url);
-    if (!outcome.ok) return { ok: false, reason: `The URL ${url} is not reachable: ${outcome.reason}.` };
+    if (!outcome.ok) return { ok: false, code: "dead", reason: `The URL ${url} is not reachable: ${outcome.reason}.` };
   }
   return { ok: true };
 }

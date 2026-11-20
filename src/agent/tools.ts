@@ -53,17 +53,38 @@ export function toolsForModel(): unknown[] {
   }));
 }
 
+/** The rules a refusal inside the agent's own process can carry (see refusals.ts). The orchestrator re-checks them. */
+export type LocalRefusalRule = "local.shell" | "local.path" | "local.symlink" | "unclassified";
+
+/** What a local tool did: its text, and the rule if it refused. */
+export interface LocalToolOutcome {
+  output: string;
+  refusal?: { rule: LocalRefusalRule };
+}
+
+const done = (output: string): LocalToolOutcome => ({ output });
+const refused = (rule: LocalRefusalRule, output: string): LocalToolOutcome => ({ output, refusal: { rule } });
+
 export async function executeLocalTool(input: {
   workspace: string;
   call: ToolCall;
   denyHosts: string[];
 }): Promise<string> {
+  return (await runLocalTool(input)).output;
+}
+
+/** Run a tool in the agent's process and say whether it refused, and under which rule, so the loop can report it. */
+export async function runLocalTool(input: {
+  workspace: string;
+  call: ToolCall;
+  denyHosts: string[];
+}): Promise<LocalToolOutcome> {
   const args = input.call.arguments;
   if (input.call.name === "shell") {
     const command = String(args.command ?? "");
     const review = reviewCommand(command);
-    if (!review.allowed) return review.reason;
-    return runShell(input.workspace, command);
+    if (!review.allowed) return refused("local.shell", review.reason);
+    return done(await runShell(input.workspace, command));
   }
   if (input.call.name === "fetch_url") {
     const url = String(args.url ?? "");
@@ -72,30 +93,30 @@ export async function executeLocalTool(input: {
       const looked = await dns.lookup(host, { all: true });
       return looked.map((entry) => entry.address);
     });
-    if (!review.allowed) return review.reason;
+    if (!review.allowed) return refused("unclassified", review.reason);
     // The orchestrator fetches the page itself, so its text passes the tripwires and is recorded (BO-2.1c).
-    return "This tool is handled by the orchestrator.";
+    return done("This tool is handled by the orchestrator.");
   }
   if (input.call.name === "read_file" || input.call.name === "write_file") {
     const requested = String(args.path ?? "");
     const kind = classifyAgentPath(requested);
-    if (kind === "deny") return "Paths must stay inside the workspace.";
+    if (kind === "deny") return refused("local.path", "Paths must stay inside the workspace.");
     if (kind === "ref") {
-      if (input.call.name === "write_file") return "Reference files are read-only.";
+      if (input.call.name === "write_file") return refused("local.path", "Reference files are read-only.");
       return readRef(requested);
     }
     const target = resolveWorkspace(input.workspace, requested);
-    if (!target) return "Paths must stay inside the workspace.";
+    if (!target) return refused("local.path", "Paths must stay inside the workspace.");
     if (input.call.name === "read_file") return readWorkspaceFile(input.workspace, target);
     const content = String(args.content ?? "");
     const review = reviewText(content);
-    if (!review.allowed) return review.reason;
-    if (!canWriteInside(input.workspace, target)) return "Paths must stay inside the workspace.";
+    if (!review.allowed) return refused("unclassified", review.reason);
+    if (!canWriteInside(input.workspace, target)) return refused("local.symlink", "Paths must stay inside the workspace.");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, content);
-    return `Wrote ${path.relative(input.workspace, target)} (${content.length} bytes).`;
+    return done(`Wrote ${path.relative(input.workspace, target)} (${content.length} bytes).`);
   }
-  return "This tool is handled by the orchestrator.";
+  return done("This tool is handled by the orchestrator.");
 }
 
 let refRoot = "/ref";
@@ -121,21 +142,23 @@ export function classifyAgentPath(requested: string): "workspace" | "ref" | "den
   return "workspace";
 }
 
-function readRef(requested: string): string {
+function readRef(requested: string): LocalToolOutcome {
   const root = path.resolve(refRoot);
   const target = path.resolve(requested);
-  if (target !== root && !target.startsWith(`${root}${path.sep}`)) return "Paths must stay inside the workspace.";
+  if (target !== root && !target.startsWith(`${root}${path.sep}`)) return refused("local.path", "Paths must stay inside the workspace.");
   let realRoot = root;
   let real = target;
   try {
     realRoot = fs.realpathSync(root);
     real = fs.realpathSync(target);
   } catch {
-    return "File not found.";
+    return done("File not found.");
   }
-  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) return "Paths must stay inside the workspace.";
-  if (!fs.statSync(real).isFile()) return "File not found.";
-  return fs.readFileSync(real, "utf8").slice(0, 12_000);
+  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) {
+    return refused("local.symlink", "Paths must stay inside the workspace.");
+  }
+  if (!fs.statSync(real).isFile()) return done("File not found.");
+  return done(fs.readFileSync(real, "utf8").slice(0, 12_000));
 }
 
 /**
@@ -143,20 +166,22 @@ function readRef(requested: string): string {
  * reach a file outside it. Anything under evidence/ holds text that came from the outside world (saved pages,
  * crawls, feeds, browse transcripts), so it goes through the same tripwires and fence as a live sense result.
  */
-function readWorkspaceFile(workspace: string, target: string): string {
+function readWorkspaceFile(workspace: string, target: string): LocalToolOutcome {
   let realRoot: string;
   let real: string;
   try {
     realRoot = fs.realpathSync(workspace);
     real = fs.realpathSync(target);
   } catch {
-    return "File not found.";
+    return done("File not found.");
   }
-  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) return "Paths must stay inside the workspace.";
-  if (!fs.statSync(real).isFile()) return "File not found.";
+  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) {
+    return refused("local.symlink", "Paths must stay inside the workspace.");
+  }
+  if (!fs.statSync(real).isFile()) return done("File not found.");
   const text = fs.readFileSync(real, "utf8").slice(0, 12_000);
   const inEvidence = path.relative(realRoot, real).split(path.sep)[0] === "evidence";
-  return inEvidence ? guardSenseText("read_file", text).output : text;
+  return done(inEvidence ? guardSenseText("read_file", text).output : text);
 }
 
 /**

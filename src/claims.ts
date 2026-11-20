@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { reviewText } from "./constitution.js";
+import { ruleForLaw, type RuleId } from "./refusals.js";
 import { guardSenseText, sanitizeSenseText, truncateInsideFence } from "./tripwires.js";
 
 /**
@@ -27,7 +28,7 @@ export interface ClaimDraft {
   threat: "low" | "medium";
 }
 
-export type ClaimCheck = { ok: true; draft: ClaimDraft } | { ok: false; reason: string };
+export type ClaimCheck = { ok: true; draft: ClaimDraft } | { ok: false; reason: string; rule: RuleId };
 
 type IdsResult = { ok: true; ids: number[] } | { ok: false; reason: string };
 
@@ -62,28 +63,32 @@ export function parseEvidenceIds(value: unknown): IdsResult {
 /** Check a claim before anything is charged or stored. The hourly limit is the caller's check, made first. */
 export function checkClaim(db: DatabaseSync, agentId: string, statementRaw: unknown, idsRaw: unknown): ClaimCheck {
   const statement = String(statementRaw ?? "").trim();
-  if (!statement) return { ok: false, reason: "Statement is empty." };
+  if (!statement) return { ok: false, reason: "Statement is empty.", rule: "claim.shape" };
   if (statement.length > CLAIM_MAX_CHARS) {
-    return { ok: false, reason: `Statement is longer than ${CLAIM_MAX_CHARS} characters.` };
+    return { ok: false, reason: `Statement is longer than ${CLAIM_MAX_CHARS} characters.`, rule: "claim.shape" };
   }
   const review = reviewText(statement);
-  if (!review.allowed) return { ok: false, reason: review.reason };
+  if (!review.allowed) return { ok: false, reason: review.reason, rule: ruleForLaw(review.law) };
   const guarded = guardSenseText("claim", statement);
   if (guarded.quarantined) {
-    return { ok: false, reason: `Statement looks like an attack on the agent's own memory (${guarded.flags.join(",")}).` };
+    return {
+      ok: false,
+      reason: `Statement looks like an attack on the agent's own memory (${guarded.flags.join(",")}).`,
+      rule: "claim.tripwire",
+    };
   }
   const parsed = parseEvidenceIds(idsRaw);
-  if (!parsed.ok) return { ok: false, reason: parsed.reason };
+  if (!parsed.ok) return { ok: false, reason: parsed.reason, rule: "claim.shape" };
   for (const id of parsed.ids) {
     const row = db.prepare("SELECT agent_id, status FROM evidence WHERE id = ?").get(id) as
       | { agent_id: string; status: string }
       | undefined;
     // Unknown and foreign ids get the same reason, so the tool says nothing about other agents' rows.
     if (!row || row.agent_id !== agentId) {
-      return { ok: false, reason: `Evidence id ${id} is not one of your usable evidence rows.` };
+      return { ok: false, reason: `Evidence id ${id} is not one of your usable evidence rows.`, rule: "claim.evidence" };
     }
     if (row.status !== USABLE_EVIDENCE_STATUS) {
-      return { ok: false, reason: `Evidence id ${id} is ${row.status}, so it cannot back a claim.` };
+      return { ok: false, reason: `Evidence id ${id} is ${row.status}, so it cannot back a claim.`, rule: "claim.evidence" };
     }
   }
   const status: ClaimStatus = parsed.ids.length > 0 ? "verified" : "unverified";

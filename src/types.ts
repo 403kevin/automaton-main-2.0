@@ -83,9 +83,11 @@ export interface ServedEndpoint {
   lastTestAt: number | null;
   /** Consecutive failed re-tests. */
   testFailures: number;
+  /** The query the publish test ran with, reused by every re-test. Empty when none. */
+  sampleQuery: Record<string, string>;
 }
 
-export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
+export type Result<T> = { ok: true; value: T } | { ok: false; error: string; rule?: string };
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
