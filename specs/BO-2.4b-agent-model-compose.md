@@ -62,5 +62,7 @@ An allowlist of models (`ALLOWED_MODELS`, defaulting to every model the config a
 
 ## Further Notes
 
+- **Built as follows, where the build refined this spec.** The typo check scans every file under `src/` for the names it reads (`env.NAME`, `process.env.NAME`, `env["NAME"]`), not only `config.ts`: `CONSTITUTION_DENY_HOSTS` is read by the constitution module and the seeding variables by the CLI. The two existing tests that give an agent its own model (`charging-context`, `tiers`) now set `ALLOWED_MODELS`, because the default list names only the configured models; no assertion in them changed. In the daily report "Model reliability" now comes before "Predictions" (the Predictions test reads from its heading to the end of the report, and the new per-agent lines would otherwise fall inside what it reads). The "Assigned and served" lines are listed for living agents. The start-up reset covers living agents.
+
 - "Lightly moderated" is a reputation, not something measured; the constitution and every guard stay on regardless of the model.
 - The default allowlist is deliberately permissive so that nothing breaks; an owner who wants it tight sets `ALLOWED_MODELS`.
