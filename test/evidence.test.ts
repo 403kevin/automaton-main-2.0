@@ -154,6 +154,7 @@ describe("evidence table", () => {
     const box = await rig();
     const result = await box.swarm.handleTool(box.id, call("see_page", { url: PAGE }));
     if (!result.ok || !result.output) throw new Error("no output");
+    expect(result.output).toMatch(OPEN);
     expect(result.output).toContain(`Shop\n\n${PRODUCT}\n\nhttps://shop.example/a`);
   });
 
@@ -183,7 +184,8 @@ describe("evidence table", () => {
     const box = await rig();
     const before = box.swarm.snapshot(box.id).balanceUnits;
     box.probe.text = HOSTILE;
-    await box.swarm.handleTool(box.id, call("see_page", { url: PAGE }, "q-1"));
+    const hostile = await box.swarm.handleTool(box.id, call("see_page", { url: PAGE }, "q-1"));
+    expect(hostile.ok && hostile.output).toContain("quarantined=true");
     const afterHostile = box.swarm.snapshot(box.id).balanceUnits;
     box.probe.text = PRODUCT;
     await box.swarm.handleTool(box.id, call("see_page", { url: PAGE }, "q-2"));
