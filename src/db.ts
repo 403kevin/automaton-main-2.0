@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   agent_id TEXT NOT NULL,
   content TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  model TEXT
 );
 
 CREATE TABLE IF NOT EXISTS spend (
@@ -212,7 +213,14 @@ export function openDatabase(file: string): DatabaseSync {
   ensurePayerClass(db);
   ensureEvidenceColumns(db);
   ensureEndpointColumns(db);
+  ensureTurnColumns(db);
   return db;
+}
+
+/** Add the nullable turns.model column (the model that actually served the turn) to a table made before it. */
+function ensureTurnColumns(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(turns)").all() as unknown as { name: string }[];
+  if (!cols.some((col) => col.name === "model")) db.exec("ALTER TABLE turns ADD COLUMN model TEXT");
 }
 
 /**

@@ -35,6 +35,8 @@ services:
       LOW_COMPUTE_MODEL: ${LOW_COMPUTE_MODEL:-meta-llama/llama-3.1-8b-instruct}
       CRITICAL_MODEL: ${CRITICAL_MODEL:-meta-llama/llama-3.1-8b-instruct}
       COUNCIL_MODELS: ${COUNCIL_MODELS:-meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct}
+      FALLBACK_MODELS: ${FALLBACK_MODELS:-}
+      MODEL_PRICES: ${MODEL_PRICES:-}
       # browse is off until the owner sets BROWSE_ENABLED=true. The LLM proxy listens
       # only on the senses-network address below, never on the agent network.
       BROWSE_ENABLED: ${BROWSE_ENABLED:-false}

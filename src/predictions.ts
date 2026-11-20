@@ -88,8 +88,10 @@ export function insertPrediction(db: DatabaseSync, agentId: string, input: Predi
   return Number(result.lastInsertRowid);
 }
 
-const CREDIT_VALUE = /^units=(\d+) payer_class=([a-z_]+)$/;
-const OK_DELIVERY = /^code=ok bytes=\d+$/;
+/** The text formats of the facts that settlement reads. A round-trip test drives the real writers against these. */
+export const CREDIT_VALUE = /^units=(\d+) payer_class=([a-z_]+)$/;
+export const OK_DELIVERY = /^code=ok bytes=\d+$/;
+export const DELIVERY_VALUE = /^code=[a-z]+ bytes=\d+$/;
 
 interface FactRow {
   subject: string;

@@ -1,4 +1,4 @@
-import type { AppConfig } from "./config.js";
+import type { AppConfig, ModelPrice } from "./config.js";
 import { costUnits, type LlmClient } from "./llm.js";
 import { newId } from "./ids.js";
 import { reviewText } from "./constitution.js";
@@ -31,9 +31,14 @@ export class InferenceGateway {
     try {
       completion = await this.llm.complete({ model: snapshot.model, messages, tools });
     } catch (error) {
-      return { skipped: true, reason: error instanceof Error ? error.message : "The model call failed." };
+      // Every model failed after backoff and fallback: a lost wake. Nothing is debited (a debit follows only a completed call).
+      const reason = error instanceof Error ? error.message : "The model call failed.";
+      this.swarm.recordLostWake(agentId, snapshot.model, reason);
+      return { skipped: true, reason };
     }
-    const actual = billable(completion.usage, completion.model, ceiling);
+    // The model that actually answered, which the turn will record and the cost is computed for.
+    this.swarm.noteServedModel(agentId, completion.model);
+    const actual = billable(completion.usage, completion.model, ceiling, this.config.modelPrices);
     const debited = this.swarm.debit(agentId, actual, "inference", `infer:${newId()}`, completion.model);
     if (!debited.ok) return { skipped: true, reason: debited.error };
     const toolCalls: ToolCall[] = completion.toolCalls.slice(0, 4).map((call) => ({
@@ -70,7 +75,7 @@ export class InferenceGateway {
           ],
         });
         voices.push(`${model}: ${reply.content}`);
-        spent += billable(reply.usage, model, ceiling);
+        spent += billable(reply.usage, model, ceiling, this.config.modelPrices);
       } catch (error) {
         voices.push(`${model}: unavailable (${error instanceof Error ? error.message : "error"})`);
       }
@@ -85,7 +90,7 @@ export class InferenceGateway {
         ],
       });
       synthesis = synth.content || synthesis;
-      spent += billable(synth.usage, snapshot.model, synthCeiling);
+      spent += billable(synth.usage, snapshot.model, synthCeiling, this.config.modelPrices);
     } catch {
       synthesis = voices.join("\n");
     }
@@ -122,9 +127,13 @@ function parseArgs(raw: string): Record<string, unknown> {
   return {};
 }
 
-function safeCost(usage: { promptTokens: number; completionTokens: number; costUsd?: string }, model: string): number {
+function safeCost(
+  usage: { promptTokens: number; completionTokens: number; costUsd?: string },
+  model: string,
+  prices?: Record<string, ModelPrice>,
+): number {
   try {
-    return costUnits(usage, model);
+    return costUnits(usage, model, prices);
   } catch {
     return 1;
   }
@@ -134,6 +143,7 @@ function billable(
   usage: { promptTokens: number; completionTokens: number; costUsd?: string },
   model: string,
   ceiling: number,
+  prices?: Record<string, ModelPrice>,
 ): number {
-  return Math.min(ceiling, Math.max(1, safeCost(usage, model)));
+  return Math.min(ceiling, Math.max(1, safeCost(usage, model, prices)));
 }

@@ -1,5 +1,5 @@
 import { buildCompletionBody, extractActions, toolCallsFromActions } from "./actions.js";
-import type { AppConfig } from "./config.js";
+import type { AppConfig, ModelPrice } from "./config.js";
 import { fetchWithBackoff } from "./http.js";
 import { ModelContextCache, trimMessagesToFit } from "./model-context.js";
 import { parseUsd } from "./money.js";
@@ -28,9 +28,10 @@ const PRICES: Record<string, { promptPerM: number; completionPerM: number }> = {
   default: { promptPerM: 0.15, completionPerM: 0.6 },
 };
 
-export function costUnits(usage: LlmUsage, model: string): number {
+/** The cost of a turn for the model that served it: OpenRouter's billed cost when it sends one, else that model's price. */
+export function costUnits(usage: LlmUsage, model: string, prices?: Record<string, ModelPrice>): number {
   if (usage.costUsd) return Math.max(1, parseUsd(usage.costUsd));
-  const price = PRICES[model] ?? PRICES.default;
+  const price = prices?.[model] ?? PRICES[model] ?? PRICES.default;
   const dollars =
     (usage.promptTokens / 1_000_000) * price.promptPerM + (usage.completionTokens / 1_000_000) * price.completionPerM;
   return Math.max(1, Math.round(dollars * 1_000_000));
@@ -110,13 +111,20 @@ export class OpenRouterLlm implements LlmClient {
     return planned.protocol !== "tools";
   }
 
+  /** The primary first, then the configured fallbacks that are not the primary. One entry means no fallback. */
+  private modelsFor(primary: string): string[] {
+    return [primary, ...this.config.fallbackModels.filter((model) => model !== primary)];
+  }
+
   async complete(input: { model: string; messages: ChatMessage[]; tools?: unknown[] }): Promise<LlmCompletion> {
+    const models = this.modelsFor(input.model);
     const supported = await this.catalog.supportedParameters(input.model);
     const planned = buildCompletionBody({ model: input.model, messages: input.messages, tools: input.tools, supported });
     const maxTokens = completionLimit(planned.body);
-    const contextLength = await this.contexts.contextLength(input.model);
+    // Any model in the list may answer, so the prompt must fit the smallest window among them.
+    const contextLength = Math.min(...(await Promise.all(models.map((model) => this.contexts.contextLength(model)))));
     const fitted = trimMessagesToFit(asMessages(planned.body.messages), contextLength, maxTokens);
-    const first = await this.post({ ...planned.body, messages: fitted });
+    const first = await this.post(withModels({ ...planned.body, messages: fitted }, models), input.model);
     if (planned.protocol === "tools") return first;
     const parsed = extractActions(first.content);
     if (parsed.ok) {
@@ -129,7 +137,7 @@ export class OpenRouterLlm implements LlmClient {
     );
     let second: LlmCompletion;
     try {
-      second = await this.post({ ...planned.body, messages: retryMessages });
+      second = await this.post(withModels({ ...planned.body, messages: retryMessages }, models), input.model);
     } catch {
       return { ...first, toolCalls: [] };
     }
@@ -142,7 +150,7 @@ export class OpenRouterLlm implements LlmClient {
     };
   }
 
-  private async post(body: Record<string, unknown>): Promise<LlmCompletion> {
+  private async post(body: Record<string, unknown>, requestedModel: string): Promise<LlmCompletion> {
     const response = await fetchWithBackoff(
       this.config.openRouterUrl,
       {
@@ -161,13 +169,15 @@ export class OpenRouterLlm implements LlmClient {
     const text = await response.text();
     if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}: ${text.slice(0, 300)}`);
     const parsed = JSON.parse(text) as {
+      model?: string;
       choices?: { message?: { content?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
     };
     const message = parsed.choices?.[0]?.message;
     const cost = parsed.usage?.cost;
     return {
-      model: String(body.model ?? ""),
+      // The model that actually answered: with fallbacks it may not be the one asked for (OpenRouter names it in the response).
+      model: typeof parsed.model === "string" && parsed.model ? parsed.model : requestedModel,
       content: message?.content ?? "",
       toolCalls: (message?.tool_calls ?? []).map((call) => ({
         id: call.id,
@@ -181,6 +191,14 @@ export class OpenRouterLlm implements LlmClient {
       },
     };
   }
+}
+
+/** With fallbacks, OpenRouter takes the whole ordered list as `models` (and no `model`); without, the body is unchanged. */
+function withModels(body: Record<string, unknown>, models: string[]): Record<string, unknown> {
+  if (models.length < 2) return body;
+  const rest = { ...body };
+  delete rest.model;
+  return { ...rest, models };
 }
 
 function asMessages(value: unknown): ChatMessage[] {

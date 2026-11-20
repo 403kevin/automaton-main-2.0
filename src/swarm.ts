@@ -39,6 +39,7 @@ import { HttpSensesClient, SensesRequestError, type CrawlSiteResult, type FeedRe
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
+import { modelReliabilityLines } from "./model-report.js";
 import {
   HOUR_MS,
   insertPrediction,
@@ -155,6 +156,8 @@ export class Swarm {
   private councilRunner?: (agentId: string, question: string) => Promise<Result<string>>;
   private offerVerifier?: OfferVerifier;
   private urlChecker?: UrlChecker;
+  /** The model that served each agent's latest wake, held until its turn is recorded. Set by the gateway, not the agent. */
+  private readonly servedModels = new Map<string, string>();
   private settler: PaymentSettler | null = null;
   private reportTimer: ReturnType<typeof setInterval> | null = null;
   private readonly sensesClient: SensesClient;
@@ -516,9 +519,23 @@ export class Swarm {
     };
   }
 
+  /** The inference gateway says which model actually answered this agent's wake; the next turn records it. */
+  noteServedModel(agentId: string, model: string): void {
+    this.servedModels.set(agentId, sanitizeSenseText(model).slice(0, 100));
+  }
+
+  /** Every model failed for this wake. Nothing was debited. It is an event, not a refusal: no tool call was refused. */
+  recordLostWake(agentId: string, model: string, reason: string): void {
+    this.event(agentId, "lost_wake", `model=${model} reason=${reason.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+
   recordTurn(agentId: string, text: string): void {
     const content = text.slice(0, 2000);
-    this.db.prepare("INSERT INTO turns (agent_id, content, created_at) VALUES (?, ?, ?)").run(agentId, content, this.clock.now());
+    const model = this.servedModels.get(agentId) ?? null;
+    this.servedModels.delete(agentId);
+    this.db
+      .prepare("INSERT INTO turns (agent_id, content, created_at, model) VALUES (?, ?, ?, ?)")
+      .run(agentId, content, this.clock.now(), model);
     this.db.prepare("UPDATE agents SET last_action = ? WHERE id = ?").run(content, agentId);
   }
 
@@ -1446,6 +1463,7 @@ export class Swarm {
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));
     lines.push(...refusalReportLines(this.db, since, names));
     lines.push(...predictionReportLines(this.db, since, names));
+    lines.push(...modelReliabilityLines(this.db, since, names));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
