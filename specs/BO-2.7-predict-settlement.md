@@ -41,7 +41,7 @@ A `predict` tool stores a prediction: a metric from a closed list, a comparison,
 
 **Fee and limits.** `toolCosts.predict` from `PREDICT_COST_USD` (default 0.0001), `PREDICT_HOURLY_LIMIT` (default 10), and at most 20 open predictions per agent. Checks run in this order and stop at the first failure, before any charge, so a rejected prediction is free:
 1. The hourly limit: stored predictions plus refused predictions in the last hour (read from the refusals table, tool `predict`, runtime rows). A refusal for this limit is recorded but is not counted, so it does not extend its own lockout (the same pattern as the claim and offer-check limits). Rule `limit.hourly.predict`.
-2. Shape: metric, op, value and deadline. Rule `predict.shape`.
+2. Shape: the metric, the op, the value, the deadline and the note's length (at most 300 characters). Rule `predict.shape`.
 3. The note: `reviewText` (rule `constitution.<law>`), then `guardSenseText` (rule `predict.tripwire`).
 4. The open cap: 20 open predictions. Rule `predict.open_cap`.
 5. The fee, through `chargeTool`; an unaffordable fee is refused with the ledger rule.
