@@ -121,11 +121,11 @@ describe("browse tool", () => {
     const step = parseUsd("0.005");
     const charged = 15 * step + 10_000;
     expect(rig.swarm.snapshot(created.value.id).balanceUnits).toBe(before - charged);
-    const agent = getAgent(rig.db, created.value.id);
-    if (!agent) throw new Error("missing");
-    const file = fs.readdirSync(`${agent.workspace}/evidence`).find((name) => name.endsWith("-browse.json"));
+    // Raw browse JSON lives under DATA_DIR/sense-raw/<agent_id>/, never in the workspace.
+    const rawDir = `${rig.dir}/sense-raw/${created.value.id}`;
+    const file = fs.readdirSync(rawDir).find((name) => name.endsWith("-browse.json"));
     expect(file).toBeTruthy();
-    const saved = JSON.parse(fs.readFileSync(`${agent.workspace}/evidence/${file}`, "utf8")) as { steps: number; llmCostUnits: number };
+    const saved = JSON.parse(fs.readFileSync(`${rawDir}/${file}`, "utf8")) as { steps: number; llmCostUnits: number };
     expect(saved.steps).toBe(15);
     expect(saved.llmCostUnits).toBe(10_000);
     const events = rig.db

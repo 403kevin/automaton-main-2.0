@@ -532,10 +532,11 @@ describe("read_feed ledger", () => {
     if (ok.ok) expect(ok.output).toContain("hello feed");
     expect(probe.balanceAtCall[0]).toBe(start - price);
     expect(rig.swarm.snapshot(id).balanceUnits).toBe(start - price);
-    const agent = rig.db.prepare("SELECT workspace FROM agents WHERE id = ?").get(id) as { workspace: string };
-    const files = fs.readdirSync(path.join(agent.workspace, "evidence"));
+    // Raw feed JSON lives under DATA_DIR/sense-raw/<agent_id>/, never in the workspace.
+    const rawDir = path.join(rig.dir, "sense-raw", id);
+    const files = fs.readdirSync(rawDir);
     expect(files[0]).toMatch(/-feed\.json$/);
-    const saved = JSON.parse(fs.readFileSync(path.join(agent.workspace, "evidence", files[0] ?? ""), "utf8")) as FeedResult;
+    const saved = JSON.parse(fs.readFileSync(path.join(rawDir, files[0] ?? ""), "utf8")) as FeedResult;
     expect(saved.items[0]?.title).toBe("Ears");
 
     probe.mode = "refuse";

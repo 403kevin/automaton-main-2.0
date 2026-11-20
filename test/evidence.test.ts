@@ -349,16 +349,14 @@ describe("quarantine read-back", () => {
     expect(await readAsAgent(box, "link.txt")).toBe("Paths must stay inside the workspace.");
   });
 
-  it("quarantines a saved crawl file when read_file reads it back", async () => {
+  it("quarantines an older raw crawl file left in evidence/ when read_file reads it back", async () => {
+    // Since BO-2.1c the sense tools no longer save raw JSON in the workspace; this file stands for one saved before.
     const box = await rig();
-    box.probe.text = HOSTILE;
-    const result = await box.swarm.handleTool(box.id, call("crawl_site", { url: PAGE, max_pages: 1 }));
-    if (!result.ok || !result.output) throw new Error("no output");
-    expect(result.output).toContain("quarantined=true");
     const agent = getAgent(box.db, box.id);
     if (!agent) throw new Error("missing");
-    const saved = fs.readdirSync(path.join(agent.workspace, "evidence")).find((name) => name.endsWith("-crawl.json"));
-    expect(saved).toBeTruthy();
+    fs.mkdirSync(path.join(agent.workspace, "evidence"), { recursive: true });
+    const saved = "1700000000000-deadbeef-crawl.json";
+    fs.writeFileSync(path.join(agent.workspace, "evidence", saved), JSON.stringify({ pages: [{ markdown: HOSTILE }] }));
     const read = await readAsAgent(box, `evidence/${saved}`);
     expect(read).toContain("quarantined=true threat=critical");
     expect(read).not.toContain(ADDRESS);
