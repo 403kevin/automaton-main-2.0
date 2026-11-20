@@ -1,6 +1,7 @@
 # BO-2.2 — no phantom products (+ BO-2.1b carry-over)
 
 Spec for ORDER BO-2.2 (section 27 of `AUTOMATON_COLLAB_FOR_GROK.md`), plan row BO-2.2: an offer whose handler is missing cannot publish; an offer whose test returns an empty body or a failure cannot publish; the preview shows real output; two failed re-tests unpublish it, with an event; a description with a dead outside URL is refused with a reason. Also from BO-0.5: text that claims a product that has no endpoint is refused. Test deliveries become runtime `facts` ([BO-2.1b](BO-2.1b-claim-facts.md)).
+Follow-up: [BO-2.3](BO-2.3-refusal-records.md) records every refusal with a rule ID, stores `sample_query` so a re-test reuses it, and caps free gate attempts per hour.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 The runtime only checks that an offer works. It never judges what is sold, and no prompt text suggests anything to sell.
 

@@ -1,7 +1,7 @@
 import { buildSystemPrompt, buildWakeup } from "../prompt.js";
 import { fitNotes } from "../tripwires.js";
 import type { AgentSnapshot, ChatMessage, ToolCall } from "../types.js";
-import { executeLocalTool, toolsForModel } from "./tools.js";
+import { runLocalTool, toolsForModel } from "./tools.js";
 
 /** Characters of tool notes kept in one turn summary. A fenced sense result is cut inside its fence. */
 const TURN_SUMMARY_CHARS = 1800;
@@ -21,6 +21,8 @@ export interface AgentHost {
     call: ToolCall,
   ): Promise<{ ok: true; handled: boolean; output?: string } | { ok: false; reason: string }>;
   recordTurn(agentId: string, text: string): Promise<void>;
+  /** Report a refusal that happened in the agent's own process (a local shell, path or symlink rule). */
+  recordRefusal(agentId: string, tool: string, rule: string, reason: string): Promise<void>;
 }
 
 export async function runAgentLoop(input: {
@@ -78,8 +80,12 @@ async function oneTurn(input: {
       notes.push(`${call.name}: ${auth.output ?? "ok"}`);
       continue;
     }
-    const output = await executeLocalTool({ workspace: input.workspace, call, denyHosts: input.denyHosts });
-    notes.push(`${call.name}: ${output}`);
+    const local = await runLocalTool({ workspace: input.workspace, call, denyHosts: input.denyHosts });
+    if (local.refusal) {
+      // A failure to report must never break the turn.
+      await input.host.recordRefusal(input.agentId, call.name, local.refusal.rule, local.output).catch(() => undefined);
+    }
+    notes.push(`${call.name}: ${local.output}`);
   }
   const summary = fitNotes(notes, TURN_SUMMARY_CHARS);
   await input.host.recordTurn(input.agentId, summary || first.content || "Acted.");

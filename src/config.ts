@@ -96,6 +96,7 @@ export interface AppConfig {
   handlerTimeoutMs: number;
   handlerQueueTimeoutMs: number;
   offerRetestIntervalMs: number;
+  offerCheckHourlyLimit: number;
   handlerImage: string;
   toolCosts: Record<string, number>;
 }
@@ -343,6 +344,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     handlerTimeoutMs: atLeast(env.HANDLER_TIMEOUT_MS, 10_000, 1, "HANDLER_TIMEOUT_MS"),
     handlerQueueTimeoutMs: atLeast(env.HANDLER_QUEUE_TIMEOUT_MS, 10_000, 1, "HANDLER_QUEUE_TIMEOUT_MS"),
     offerRetestIntervalMs: atLeast(env.OFFER_RETEST_INTERVAL_MS, 21_600_000, 1, "OFFER_RETEST_INTERVAL_MS"),
+    offerCheckHourlyLimit: integer(env.OFFER_CHECK_HOURLY_LIMIT, 20, "OFFER_CHECK_HOURLY_LIMIT"),
     handlerImage:
       (env.HANDLER_IMAGE ?? "").trim() || selectHandlerImage(agentImage, env.AGENT_IMAGE_HAS_NODE !== "false"),
     toolCosts: {

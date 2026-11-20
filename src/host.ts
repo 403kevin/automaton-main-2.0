@@ -24,4 +24,8 @@ export class DirectHost implements AgentHost {
   async recordTurn(agentId: string, text: string): Promise<void> {
     this.swarm.recordTurn(agentId, text);
   }
+
+  async recordRefusal(agentId: string, tool: string, rule: string, reason: string): Promise<void> {
+    this.swarm.recordAgentRefusal(agentId, tool, rule, reason);
+  }
 }
