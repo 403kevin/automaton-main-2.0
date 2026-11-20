@@ -108,7 +108,7 @@ const SENSE_CALLS: ToolCall[] = [
 ];
 
 describe("evidence table", () => {
-  it("has the eleven columns in the specified order", async () => {
+  it("has the twelve columns in the specified order", async () => {
     const box = await rig();
     const cols = box.db.prepare("PRAGMA table_info(evidence)").all() as unknown as { name: string }[];
     expect(cols.map((col) => col.name)).toEqual([
@@ -123,6 +123,7 @@ describe("evidence table", () => {
       "flags",
       "created_at",
       "quarantine_path",
+      "raw_path",
     ]);
   });
 
