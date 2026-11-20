@@ -444,6 +444,12 @@ describe("the soak template and the source", () => {
     expect(config.modelPrices[GEMINI]).toEqual({ promptPerM: 0.1, completionPerM: 0.4 });
   });
 
+  it("is passed to the orchestrator by docker-compose, because compose forwards only the variables it names", () => {
+    const compose = fs.readFileSync(fileURLToPath(new URL("../docker-compose.yml", import.meta.url)), "utf8");
+    expect(compose).toMatch(/^\s+FALLBACK_MODELS: \$\{FALLBACK_MODELS:-\}\s*$/m);
+    expect(compose).toMatch(/^\s+MODEL_PRICES: \$\{MODEL_PRICES:-\}\s*$/m);
+  });
+
   it("has no fallback model ID written in src", () => {
     const root = fileURLToPath(new URL("../src", import.meta.url));
     const walk = (dir: string): string[] =>
