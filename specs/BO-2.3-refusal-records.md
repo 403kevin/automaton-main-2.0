@@ -1,6 +1,7 @@
 # BO-2.3 — refusal records (+ PR #6 carry-over)
 
 Spec for ORDER BO-2.3 (section 29 of `AUTOMATON_COLLAB_FOR_GROK.md`), plan row BO-2.3: "Each refusal row has a rule ID and a reason; the report lists the counts by rule." It also carries over four items from the PR #6 review: a constitution-blocked claim logs `constitution_block`; the sample query is stored and used by the re-test; free gate attempts are capped per hour; the app wiring gets a test. Follows [BO-2.2](BO-2.2-no-phantom-products.md).
+Follow-up: [BO-2.7](BO-2.7-predict-settlement.md) adds four rule IDs (`predict.shape`, `predict.open_cap`, `predict.tripwire`, `limit.hourly.predict`) and makes the offer gates check the fee before any sandbox run or URL check, closing the free "pass, then refused for balance" path noted under Gaps in the BO-2.3 report.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 Nothing here judges or steers what an agent sells. It only records refusals and caps free attempts.
 

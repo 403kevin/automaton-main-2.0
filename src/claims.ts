@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { reviewText } from "./constitution.js";
+import { settledPredictionLines } from "./predictions.js";
 import { ruleForLaw, type RuleId } from "./refusals.js";
 import { guardSenseText, sanitizeSenseText, truncateInsideFence } from "./tripwires.js";
 
@@ -148,7 +149,8 @@ export function ownRecords(db: DatabaseSync, agentId: string, nonce: string = ra
   const claims = db
     .prepare("SELECT statement, status FROM claims WHERE agent_id = ? ORDER BY id DESC LIMIT ?")
     .all(agentId, OWN_RECORDS_LIMIT) as unknown as ClaimRow[];
-  if (facts.length === 0 && claims.length === 0) return "";
+  const predictions = settledPredictionLines(db, agentId);
+  if (facts.length === 0 && claims.length === 0 && predictions.length === 0) return "";
   const lines = ["Your own records. Facts are written by the runtime. Claims are yours."];
   if (facts.length > 0) {
     lines.push("Facts:");
@@ -157,6 +159,8 @@ export function ownRecords(db: DatabaseSync, agentId: string, nonce: string = ra
       lines.push(`- ${fact.source} ${fact.kind} ${oneLine(fact.subject, SUBJECT_CHARS)} ${oneLine(value, VALUE_CHARS)}`);
     }
   }
+  // Predictions sit between facts and claims: they are short and fixed in shape, so the long, agent-written claims give way first.
+  if (predictions.length > 0) lines.push("Predictions:", ...predictions);
   if (claims.length > 0) {
     lines.push("Claims:");
     for (const claim of claims) lines.push(`- [${claim.status}] ${oneLine(claim.statement, CLAIM_MAX_CHARS)}`);

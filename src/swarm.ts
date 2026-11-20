@@ -39,6 +39,16 @@ import { HttpSensesClient, SensesRequestError, type CrawlSiteResult, type FeedRe
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
+import {
+  HOUR_MS,
+  insertPrediction,
+  openCount,
+  parsePredictInput,
+  PREDICT_MAX_OPEN,
+  predictAttempts,
+  predictionReportLines,
+  settlePredictions,
+} from "./predictions.js";
 import { guardSenseText, sanitizeSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
 import { checkOfferLinks, ownLinkNames, outsideUrls, type OfferVerifier, type UrlChecker } from "./verify-offer.js";
 import {
@@ -242,6 +252,8 @@ export class Swarm {
         kvSet(this.db, "last_rent_at", String(now));
       }
       await this.enforceDeaths(now);
+      // Settle every open prediction past its deadline, for every agent: a dead agent's record is completed too.
+      settlePredictions(this.db, this.clock.now());
       await this.retestEndpoints(this.clock.now());
     } finally {
       this.maintaining = false;
@@ -572,7 +584,7 @@ export class Swarm {
         this.event(agentId, "offer_service", "outcome=refused cost=0 body is empty");
         return { ok: false, reason: "An offer needs a body: the text a buyer receives.", rule: "offer.body_empty" };
       }
-      const linkProblem = await this.linkProblem(agentId, `${description}\n${body}`);
+      const linkProblem = await this.linkProblem(agentId, `${description}\n${body}`, this.config.toolCosts.offer_service ?? 0);
       if (linkProblem) {
         this.event(agentId, "offer_service", `outcome=refused cost=0 ${linkProblem.reason}`);
         return linkProblem;
@@ -646,6 +658,7 @@ export class Swarm {
     }
     if ((SENSE_TOOLS as readonly string[]).includes(call.name)) return this.senseCall(agentId, call);
     if (call.name === "claim") return this.claimTool(agentId, call);
+    if (call.name === "predict") return this.predictTool(agentId, call);
     if (call.name === "report_income" || call.name === "credit_balance" || call.name === "claim_payment") {
       this.rejectClaim(agentId, `Tool ${call.name} tried to declare income.`);
       return {
@@ -914,7 +927,7 @@ export class Swarm {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0`);
       return { ok: false, reason: `Page cap is ${MAX_PAGES_PER_AGENT}.`, rule: "offer.cap" };
     }
-    const linkProblem = await this.linkProblem(agentId, markdown);
+    const linkProblem = await this.linkProblem(agentId, markdown, this.config.publishPagePriceUnits);
     if (linkProblem) {
       this.event(agentId, "publish_page", `outcome=refused slug=${slug} cost=0 ${linkProblem.reason}`);
       return linkProblem;
@@ -1001,6 +1014,15 @@ export class Swarm {
       this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0`);
       return { ok: false, reason: snap.error, rule: "offer.handler" };
     }
+    // An agent that cannot pay the fee gets no free sandbox run: check balance and the spend caps first (BO-2.7).
+    const registerFee = this.config.serveEndpointPriceUnits;
+    if (registerFee > 0) {
+      const affordable = this.authorize(agentId, registerFee, "tool");
+      if (!affordable.ok) {
+        this.event(agentId, "serve_endpoint", `outcome=refused endpoint=${name} cost=0 ${affordable.error}`);
+        return this.ledgerRefusal(affordable);
+      }
+    }
     // The gate: run the handler once before anything is charged or registered. A refusal here is free, so the
     // number of refused attempts an agent may make per hour is capped (before the sandbox is touched).
     const capped = this.offerCheckCapped(agentId);
@@ -1051,9 +1073,14 @@ export class Swarm {
   }
 
   /** A reason to refuse this text (a dead outside URL, or a link to the agent's own missing page), or null. */
-  private async linkProblem(agentId: string, text: string): Promise<RefusalResult | null> {
+  private async linkProblem(agentId: string, text: string, feeUnits: number): Promise<RefusalResult | null> {
     // Text with no link to check costs nothing and is not capped.
     if (ownLinkNames(text, agentId).length === 0 && outsideUrls(text, agentId).length === 0) return null;
+    // An agent that cannot pay the fee gets no free URL check: balance and the spend caps first (BO-2.7).
+    if (feeUnits > 0) {
+      const affordable = this.authorize(agentId, feeUnits, "tool");
+      if (!affordable.ok) return this.ledgerRefusal(affordable);
+    }
     const capped = this.offerCheckCapped(agentId);
     if (capped) return capped;
     const checked = await checkOfferLinks({
@@ -1416,7 +1443,9 @@ export class Swarm {
       lines.push(`- ${new Date(event.created_at).toISOString()} ${event.kind}: ${event.message}`);
     }
     lines.push("");
-    lines.push(...refusalReportLines(this.db, since, new Map(agents.map((agent) => [agent.id, agent.name]))));
+    const names = new Map(agents.map((agent) => [agent.id, agent.name]));
+    lines.push(...refusalReportLines(this.db, since, names));
+    lines.push(...predictionReportLines(this.db, since, names));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });
@@ -1544,6 +1573,44 @@ export class Swarm {
     if (!charged.ok) return this.refuseClaim(agentId, charged.error, asRuleId(charged.rule));
     const id = insertClaim(this.db, agentId, checked.draft, now);
     return { ok: true, handled: true, output: `Claim ${id} stored as ${checked.draft.status}.` };
+  }
+
+  /**
+   * The predict tool (specs/BO-2.7-predict-settlement.md). Checked in order: hourly limit, shape, the note (constitution,
+   * then tripwires), the open cap, then the fee. Nothing is charged or stored until every check passes, so a rejected
+   * prediction is free. A refusal for the limit itself is not counted as an attempt.
+   */
+  private predictTool(agentId: string, call: ToolCall): ToolResult {
+    const now = this.clock.now();
+    if (predictAttempts(this.db, agentId, now - HOUR_MS) >= this.config.predictHourlyLimit) {
+      return { ok: false, reason: `predict hourly limit is ${this.config.predictHourlyLimit}.`, rule: "limit.hourly.predict" };
+    }
+    const parsed = parsePredictInput(call.arguments ?? {});
+    if (!parsed.ok) return { ok: false, reason: parsed.reason, rule: "predict.shape" };
+    const note = parsed.input.note;
+    if (note) {
+      const review = reviewText(note);
+      if (!review.allowed) {
+        this.event(agentId, "constitution_block", review.reason);
+        return { ok: false, reason: review.reason, rule: ruleForLaw(review.law) };
+      }
+      const guarded = guardSenseText("predict", note);
+      if (guarded.quarantined) {
+        return {
+          ok: false,
+          reason: `Note looks like an attack on the agent's own memory (${guarded.flags.join(",")}).`,
+          rule: "predict.tripwire",
+        };
+      }
+    }
+    if (openCount(this.db, agentId) >= PREDICT_MAX_OPEN) {
+      return { ok: false, reason: `You already have ${PREDICT_MAX_OPEN} open predictions.`, rule: "predict.open_cap" };
+    }
+    const charged = this.chargeTool(agentId, "predict", call.id);
+    if (!charged.ok) return this.ledgerRefusal(charged);
+    const id = insertPrediction(this.db, agentId, parsed.input, now);
+    const settles = new Date(now + parsed.input.hours * HOUR_MS).toISOString();
+    return { ok: true, handled: true, output: `Prediction ${id} stored. It settles after ${settles}.` };
   }
 
   private refuseClaim(agentId: string, reason: string, rule: RuleId): RefusalResult {
