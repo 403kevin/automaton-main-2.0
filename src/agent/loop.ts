@@ -1,6 +1,10 @@
 import { buildSystemPrompt, buildWakeup } from "../prompt.js";
+import { fitNotes } from "../tripwires.js";
 import type { AgentSnapshot, ChatMessage, ToolCall } from "../types.js";
 import { executeLocalTool, toolsForModel } from "./tools.js";
+
+/** Characters of tool notes kept in one turn summary. A fenced sense result is cut inside its fence. */
+const TURN_SUMMARY_CHARS = 1800;
 
 export interface AgentHost {
   snapshot(agentId: string): Promise<AgentSnapshot>;
@@ -77,7 +81,7 @@ async function oneTurn(input: {
     const output = await executeLocalTool({ workspace: input.workspace, call, denyHosts: input.denyHosts });
     notes.push(`${call.name}: ${output}`);
   }
-  const summary = notes.join("\n").slice(0, 1800);
+  const summary = fitNotes(notes, TURN_SUMMARY_CHARS);
   await input.host.recordTurn(input.agentId, summary || first.content || "Acted.");
 }
 

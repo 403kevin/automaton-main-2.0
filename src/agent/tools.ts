@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { reviewCommand, reviewText, reviewUrl } from "../constitution.js";
+import { guardSenseText } from "../tripwires.js";
 import type { ToolCall } from "../types.js";
 
 export const FEED_SOURCE_NAMES = [
@@ -85,10 +86,7 @@ export async function executeLocalTool(input: {
     }
     const target = resolveWorkspace(input.workspace, requested);
     if (!target) return "Paths must stay inside the workspace.";
-    if (input.call.name === "read_file") {
-      if (!fs.existsSync(target)) return "File not found.";
-      return fs.readFileSync(target, "utf8").slice(0, 12_000);
-    }
+    if (input.call.name === "read_file") return readWorkspaceFile(input.workspace, target);
     const content = String(args.content ?? "");
     const review = reviewText(content);
     if (!review.allowed) return review.reason;
@@ -137,6 +135,27 @@ function readRef(requested: string): string {
   if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) return "Paths must stay inside the workspace.";
   if (!fs.statSync(real).isFile()) return "File not found.";
   return fs.readFileSync(real, "utf8").slice(0, 12_000);
+}
+
+/**
+ * Read a workspace file. The real path (symlinks followed) must stay inside the real workspace, so a link cannot
+ * reach a file outside it. Anything under evidence/ holds text that came from the outside world (saved pages,
+ * crawls, feeds, browse transcripts), so it goes through the same tripwires and fence as a live sense result.
+ */
+function readWorkspaceFile(workspace: string, target: string): string {
+  let realRoot: string;
+  let real: string;
+  try {
+    realRoot = fs.realpathSync(workspace);
+    real = fs.realpathSync(target);
+  } catch {
+    return "File not found.";
+  }
+  if (real !== realRoot && !real.startsWith(`${realRoot}${path.sep}`)) return "Paths must stay inside the workspace.";
+  if (!fs.statSync(real).isFile()) return "File not found.";
+  const text = fs.readFileSync(real, "utf8").slice(0, 12_000);
+  const inEvidence = path.relative(realRoot, real).split(path.sep)[0] === "evidence";
+  return inEvidence ? guardSenseText("read_file", text).output : text;
 }
 
 function resolveWorkspace(workspace: string, requested: string): string | null {
