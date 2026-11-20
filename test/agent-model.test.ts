@@ -391,14 +391,14 @@ describe("seeding", () => {
     expect(() => parseSoakAgentModels("wick")).toThrow(/wick/);
   });
 
-  it("seeds the named agent on its own model and the others on the global one", async () => {
+  it("seeds the named agent on its own model for every tier and the others on the global one", async () => {
     const box = rig();
     await seedLocal(box.swarm, "1.50", { wick: OTHER });
     const byName = Object.fromEntries(box.swarm.overview().agents.map((item) => [item.name, item.id]));
     expect(Object.keys(byName).sort()).toEqual(["keel", "mite", "wick"]);
-    expect(models(box, byName.wick ?? "").model).toBe(OTHER);
-    expect(models(box, byName.mite ?? "").model).toBeNull();
-    expect(models(box, byName.keel ?? "").model).toBeNull();
+    expect(models(box, byName.wick ?? "")).toEqual({ model: OTHER, lowModel: OTHER, criticalModel: OTHER });
+    expect(models(box, byName.mite ?? "")).toEqual({ model: null, lowModel: null, criticalModel: null });
+    expect(models(box, byName.keel ?? "")).toEqual({ model: null, lowModel: null, criticalModel: null });
   });
 
   it("refuses an unlisted seed model before it creates any agent", async () => {
@@ -412,7 +412,7 @@ describe("seeding", () => {
     const server = await serve(box);
     await seedHttp(server.url, "test-admin", "1.50", { wick: OTHER });
     const wick = box.swarm.overview().agents.find((item) => item.name === "wick");
-    expect(models(box, wick?.id ?? "").model).toBe(OTHER);
+    expect(models(box, wick?.id ?? "")).toEqual({ model: OTHER, lowModel: OTHER, criticalModel: OTHER });
     const second = rig();
     const secondServer = await serve(second);
     await expect(seedHttp(secondServer.url, "test-admin", "1.50", { wick: "evil/unlisted" })).rejects.toThrow(/not on the allowed models list/);
