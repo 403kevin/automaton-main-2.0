@@ -77,6 +77,7 @@ export interface AppConfig {
   crawlMaxPages: number;
   readFeedPriceUnits: number;
   readFeedHourlyLimit: number;
+  claimHourlyLimit: number;
   redditUserAgent: string;
   browseEnabled: boolean;
   browseStepPriceUnits: number;
@@ -317,6 +318,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     crawlMaxPages: integer(env.CRAWL_MAX_PAGES, 20, "CRAWL_MAX_PAGES"),
     readFeedPriceUnits: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
     readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
+    claimHourlyLimit: integer(env.CLAIM_HOURLY_LIMIT, 30, "CLAIM_HOURLY_LIMIT"),
     redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
     browseEnabled: env.BROWSE_ENABLED === "true",
     browseStepPriceUnits: usd(env.BROWSE_STEP_PRICE_USD, "0.005", "BROWSE_STEP_PRICE_USD"),
@@ -355,6 +357,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       publish_page: publishPagePriceUnits,
       serve_endpoint: serveEndpointPriceUnits,
       remember: parseUsd("0.0001"),
+      claim: usd(env.CLAIM_COST_USD, "0.0001", "CLAIM_COST_USD"),
       balance: 0,
       council: 0,
       spawn_child: 0,

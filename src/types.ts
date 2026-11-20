@@ -54,6 +54,8 @@ export interface AgentSnapshot {
   rentUnits: number;
   graceUntil: number | null;
   recentTurns: string[];
+  /** The agent's own latest facts and claims in one fenced block, or empty. Own rows only. */
+  ownRecords?: string;
 }
 
 export interface ServiceOffer {

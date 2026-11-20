@@ -37,6 +37,7 @@ import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
 import { HttpSensesClient, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import type { BrowseLlmPort } from "./llm-proxy.js";
 import { checkSpend } from "./spend.js";
+import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
 import { guardSenseText, SENSE_TOOLS, type ThreatLevel } from "./tripwires.js";
 import { modelFor, RentScheduler, schedulerPollMs, tierFor } from "./survival.js";
 import type { AgentRecord, AgentSnapshot, LedgerKind, Result, SpendCategory, ToolCall } from "./types.js";
@@ -92,6 +93,9 @@ type SenseOutcome = { ok: true; handled: boolean; output?: string; rawPath?: str
 const FETCH_URL_MAX_BYTES = 100_000;
 const FETCH_URL_MAX_CHARS = 12_000;
 const FETCH_URL_TIMEOUT_MS = 15_000;
+
+/** Ledger kinds that are money coming in from outside the agent. Each posted credit of these kinds writes one fact. */
+const CREDIT_FACT_KINDS: ReadonlySet<string> = new Set(["owner_topup", "onchain_income", "x402_in", "replication_in"]);
 
 interface PostInput {
   agentId: string;
@@ -458,6 +462,7 @@ export class Swarm {
       rentUnits: this.config.dailyRentUnits,
       graceUntil: agent.graceUntil,
       recentTurns: turns.map((turn) => turn.content).reverse(),
+      ownRecords: ownRecords(this.db, agentId),
     };
   }
 
@@ -560,19 +565,7 @@ export class Swarm {
       return { ok: true, handled: false };
     }
     if ((SENSE_TOOLS as readonly string[]).includes(call.name)) return this.senseCall(agentId, call);
-    if (call.name === "web_search") {
-      const query = String(args.query ?? "").slice(0, 300);
-      if (!query) return { ok: false, reason: "Query is empty." };
-      const charged = this.chargeTool(agentId, "web_search", call.id);
-      if (!charged.ok) return { ok: false, reason: charged.error };
-      try {
-        const hits = await this.search.search(query);
-        const output = hits.map((hit) => `${hit.title}\n${hit.url}\n${hit.snippet}`).join("\n\n") || "No results.";
-        return { ok: true, handled: true, output: output.slice(0, 4000) };
-      } catch (error) {
-        return { ok: true, handled: true, output: error instanceof Error ? error.message : "Search failed." };
-      }
-    }
+    if (call.name === "claim") return this.claimTool(agentId, call);
     if (call.name === "report_income" || call.name === "credit_balance" || call.name === "claim_payment") {
       this.rejectClaim(agentId, `Tool ${call.name} tried to declare income.`);
       return { ok: false, reason: "Claims are not income. Only an on-chain transfer or an owner top-up credits the ledger." };
@@ -1258,6 +1251,7 @@ export class Swarm {
       else if (call.name === "crawl_site") result = await this.crawlSite(agentId, call);
       else if (call.name === "read_feed") result = await this.readFeed(agentId, call);
       else if (call.name === "fetch_url") result = await this.fetchUrl(agentId, call);
+      else if (call.name === "web_search") result = await this.webSearch(agentId, call);
       else result = await this.browseTask(agentId, call);
     } catch (error) {
       this.recordEvidence(agentId, call, { status: "error", threat: "none", flags: [], raw: null });
@@ -1279,6 +1273,51 @@ export class Swarm {
       rawPath: result.rawPath ?? null,
     });
     return { ok: true, handled: result.handled, output: guarded.output };
+  }
+
+  /**
+   * The claim tool (specs/BO-2.1b-claim-facts.md). Checked in order: hourly limit, statement shape, constitution,
+   * tripwires, evidence ids, then the fee. Nothing is charged or stored until every check passes. A rejected claim is
+   * logged as claim_rejected, which counts toward the hourly limit; a limit refusal is logged as claim_limit, which does not.
+   */
+  private claimTool(agentId: string, call: ToolCall): { ok: true; handled: boolean; output?: string } | { ok: false; reason: string } {
+    const args = call.arguments ?? {};
+    const now = this.clock.now();
+    if (claimAttempts(this.db, agentId, now - 3_600_000) >= this.config.claimHourlyLimit) {
+      const reason = `claim hourly limit is ${this.config.claimHourlyLimit}.`;
+      this.event(agentId, "claim_limit", reason);
+      return { ok: false, reason };
+    }
+    const checked = checkClaim(this.db, agentId, args.statement, args.evidence_ids);
+    if (!checked.ok) return this.refuseClaim(agentId, checked.reason);
+    const charged = this.chargeTool(agentId, "claim", call.id);
+    if (!charged.ok) return this.refuseClaim(agentId, charged.error);
+    const id = insertClaim(this.db, agentId, checked.draft, now);
+    return { ok: true, handled: true, output: `Claim ${id} stored as ${checked.draft.status}.` };
+  }
+
+  private refuseClaim(agentId: string, reason: string): { ok: false; reason: string } {
+    this.event(agentId, "claim_rejected", reason);
+    return { ok: false, reason };
+  }
+
+  /**
+   * web_search goes through senseCall like the other text-returning tools. The fee is charged first and kept when the
+   * provider fails; the failure is a refusal (it used to come back as an ok result carrying the error text).
+   */
+  private async webSearch(agentId: string, call: ToolCall): Promise<SenseOutcome> {
+    const query = String(call.arguments?.query ?? "").trim().slice(0, 300);
+    if (!query) return { ok: false, reason: "Query is empty." };
+    const charged = this.chargeTool(agentId, "web_search", call.id);
+    if (!charged.ok) return { ok: false, reason: charged.error };
+    try {
+      const hits = await this.search.search(query);
+      const output = hits.map((hit) => `${hit.title}\n${hit.url}\n${hit.snippet}`).join("\n\n") || "No results.";
+      return { ok: true, handled: true, output: output.slice(0, 4000) };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Search failed.";
+      return { ok: false, reason: reason.slice(0, 300) };
+    }
   }
 
   /**
@@ -1317,7 +1356,7 @@ export class Swarm {
     const args = call.arguments ?? {};
     const sorted = Object.fromEntries(Object.entries(args).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
     const target = String(args.url ?? args.source ?? "").trim();
-    this.db
+    const inserted = this.db
       .prepare(
         `INSERT INTO evidence (agent_id, tool, input_hash, output_hash, url, status, threat_level, flags, created_at, quarantine_path, raw_path)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1335,6 +1374,17 @@ export class Swarm {
         row.quarantinePath ?? null,
         row.rawPath ?? null,
       );
+    if (row.status === "ok" && row.raw !== null) {
+      // A fact is the runtime's own record of a usable sense result. No tool writes this table.
+      insertFact(this.db, {
+        agentId,
+        kind: "sense",
+        subject: target || call.name,
+        value: sha256(row.raw),
+        source: `evidence:${Number(inserted.lastInsertRowid)}`,
+        now: this.clock.now(),
+      });
+    }
   }
 
   /**
@@ -2017,12 +2067,13 @@ export class Swarm {
         rollback();
         return { ok: false, error: "Balance is too low." };
       }
+      const entryId = newId("led");
       this.db
         .prepare(
           "INSERT INTO ledger_entries (id, agent_id, kind, amount_units, balance_after, ref, note, created_at, payer_class) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .run(
-          newId("led"),
+          entryId,
           input.agentId,
           input.kind,
           input.amount,
@@ -2042,6 +2093,16 @@ export class Swarm {
         this.db
           .prepare("INSERT INTO spend (agent_id, amount_units, category, day, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(input.agentId, Math.abs(input.amount), input.category, dayKey(now), now);
+      }
+      if (input.amount > 0 && CREDIT_FACT_KINDS.has(input.kind)) {
+        insertFact(this.db, {
+          agentId: input.agentId,
+          kind: "credit",
+          subject: input.kind,
+          value: `units=${input.amount} payer_class=${input.payerClass ?? "none"}`,
+          source: `ledger:${entryId}`,
+          now,
+        });
       }
       if (owns) this.db.exec("COMMIT");
       if (recover) this.event(input.agentId, "recovered", "Top-up cleared the grace period.");
