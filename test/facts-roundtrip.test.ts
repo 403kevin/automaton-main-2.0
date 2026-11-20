@@ -57,7 +57,8 @@ describe("the real fact writers and the settlement parsers agree", () => {
     const buyer = await box.swarm.createAgent({ name: "buyer" });
     if (!seller.ok || !buyer.ok) throw new Error("create failed");
     box.swarm.ownerTopup(seller.value.id, parseUsd("5"), "seed-seller");
-    box.swarm.ownerTopup(buyer.value.id, parseUsd("1"), "seed-buyer");
+    // A dry-run payer pays from a simulated chain balance, as in hands.test.ts.
+    await box.swarm.simulateTransfer(buyer.value.id, "0x8888888888888888888888888888888888888888", parseUsd("1"), "fund-buyer");
     const agent = getAgent(box.db, seller.value.id);
     if (!agent) throw new Error("missing");
     fs.mkdirSync(path.join(agent.workspace, "job"), { recursive: true });
