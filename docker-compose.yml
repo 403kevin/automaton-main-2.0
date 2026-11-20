@@ -23,6 +23,9 @@ services:
       DOCKER_NETWORK: automaton_default
       DOCKER_VOLUME: automaton-data
       ORCHESTRATOR_URL: http://orchestrator:4747
+      SENSES_URL: http://senses:7070
+      # Host path of ./ref. The docker daemon bind-mounts it read-only at /ref in agent containers.
+      REF_DIR: ${REF_DIR:-}
       DAILY_RENT_USD: ${DAILY_RENT_USD:-0.50}
       RENT_INTERVAL_MS: ${RENT_INTERVAL_MS:-86400000}
       GRACE_MS: ${GRACE_MS:-3600000}
@@ -32,6 +35,24 @@ services:
       LOW_COMPUTE_MODEL: ${LOW_COMPUTE_MODEL:-meta-llama/llama-3.1-8b-instruct}
       CRITICAL_MODEL: ${CRITICAL_MODEL:-meta-llama/llama-3.1-8b-instruct}
       COUNCIL_MODELS: ${COUNCIL_MODELS:-meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct}
+      # browse is off until the owner sets BROWSE_ENABLED=true. The LLM proxy listens
+      # only on the senses-network address below, never on the agent network.
+      BROWSE_ENABLED: ${BROWSE_ENABLED:-false}
+      BROWSE_STEP_PRICE_USD: ${BROWSE_STEP_PRICE_USD:-0.005}
+      BROWSE_LLM_RESERVE_USD: ${BROWSE_LLM_RESERVE_USD:-0.05}
+      BROWSE_HOURLY_LIMIT: ${BROWSE_HOURLY_LIMIT:-3}
+      BROWSE_MAX_STEPS: ${BROWSE_MAX_STEPS:-15}
+      INTERNAL_LLM_PORT: "4758"
+      INTERNAL_LLM_HOST: 172.31.210.10
+      INTERNAL_LLM_ALLOW_CIDRS: 172.31.210.0/24
+      SENSES_LLM_BASE_URL: http://172.31.210.10:4758/internal/llm/v1
+    networks:
+      default: {}
+      senses:
+        ipv4_address: 172.31.210.10
+    depends_on:
+      senses:
+        condition: service_healthy
     volumes:
       - automaton-data:/app/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -49,6 +70,61 @@ services:
       retries: 5
       start_period: 20s
 
+  # Agents are started on automaton_default only. They are not on `senses`,
+  # and this service publishes no ports, so only the orchestrator can call it.
+  senses:
+    image: automaton-senses:2
+    build:
+      context: .
+      dockerfile: senses/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,size=512m
+      - /home/pwuser:rw,nosuid,size=256m
+    shm_size: "256mb"
+    init: true
+    user: pwuser
+    environment:
+      PORT: "7070"
+      HOME: /tmp
+      REDDIT_USER_AGENT: "${REDDIT_USER_AGENT:-AutomatonSenses/2.0 (key-free public JSON reader; no OAuth)}"
+      BROWSE_PYTHON: /opt/browse-venv/bin/python
+      ANONYMIZED_TELEMETRY: "false"
+    networks:
+      - senses
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:7070/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
 volumes:
   automaton-data:
     name: automaton-data
+
+networks:
+  default:
+    name: automaton_default
+  senses:
+    name: automaton_senses
+    ipam:
+      config:
+        - subnet: 172.31.210.0/24

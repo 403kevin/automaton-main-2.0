@@ -8,17 +8,21 @@ import { loadConfig, type AppConfig } from "./config.js";
 import { openDatabase } from "./db.js";
 import { DirectHost } from "./host.js";
 import { InferenceGateway } from "./inference.js";
+import { BrowseLlmProxy } from "./llm-proxy.js";
 import { createLlm } from "./llm.js";
 import { createSearch } from "./search.js";
 import { LiveSettler } from "./settle.js";
 import { Swarm } from "./swarm.js";
-import { createRuntime, FakeRuntime } from "./runtime.js";
+import { HandlerSandbox, handlerSnapshotRoot } from "./handlers.js";
+import { createRuntime, detectDockerBinary, FakeRuntime } from "./runtime.js";
 
 export interface AppContext {
   config: AppConfig;
   swarm: Swarm;
   host: DirectHost;
   clock: OffsetClock;
+  handlers: HandlerSandbox;
+  llmProxy: BrowseLlmProxy;
 }
 
 export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
@@ -49,6 +53,13 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
   const swarm = new Swarm(db, config, clock, chain, new FakeRuntime(), search);
   if (config.moneyMode === "live") swarm.setSettler(new LiveSettler(config));
   const inference = new InferenceGateway(swarm, llm, config);
+  const llmProxy = new BrowseLlmProxy({
+    clock,
+    openRouterUrl: config.openRouterUrl,
+    openRouterKey: config.openRouterKey,
+    allowCidrs: config.internalLlmAllowCidrs,
+  });
+  swarm.setBrowseLlm(llmProxy);
   swarm.setCouncil((agentId, question) => inference.council(agentId, question));
   const host = new DirectHost(swarm, inference);
   const runtime = await createRuntime(config, (spec, signal) => {
@@ -62,5 +73,14 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
     });
   });
   swarm.setRuntime(runtime);
-  return { config, swarm, host, clock };
+  const docker = await detectDockerBinary();
+  const handlers = new HandlerSandbox({
+    docker: docker ?? ["docker"],
+    image: config.handlerImage,
+    snapshotRoot: handlerSnapshotRoot(config.dataDir),
+    dockerVolume: config.dockerVolume,
+    timeoutMs: config.handlerTimeoutMs,
+    queueTimeoutMs: config.handlerQueueTimeoutMs,
+  });
+  return { config, swarm, host, clock, handlers, llmProxy };
 }

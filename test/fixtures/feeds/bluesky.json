@@ -1,0 +1,10 @@
+{
+  "posts": [
+    {
+      "uri": "at://did:plc:example/app.bsky.feed.post/abc123",
+      "author": { "handle": "ada.bsky.social", "displayName": "Ada" },
+      "record": { "text": "Public feeds, no key.\nSecond line.", "createdAt": "2026-11-01T00:00:00.000Z" },
+      "likeCount": 7
+    }
+  ]
+}

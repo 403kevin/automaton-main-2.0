@@ -24,8 +24,8 @@ export class InferenceGateway {
     if (snapshot.killSwitch) return { skipped: true, reason: "Global kill switch is on." };
     if (snapshot.status !== "running") return { skipped: true, reason: `Status is ${snapshot.status}.` };
     if (snapshot.balanceUnits <= 0) return { skipped: true, reason: "Balance is not positive." };
-    const reserve = this.config.inferenceReserveUnits;
-    const allowed = this.swarm.authorize(agentId, reserve, "inference");
+    const ceiling = await this.authorizationCeiling(snapshot.model, tools);
+    const allowed = this.swarm.authorize(agentId, ceiling, "inference");
     if (!allowed.ok) return { skipped: true, reason: allowed.error };
     let completion;
     try {
@@ -33,7 +33,7 @@ export class InferenceGateway {
     } catch (error) {
       return { skipped: true, reason: error instanceof Error ? error.message : "The model call failed." };
     }
-    const actual = Math.min(reserve, Math.max(1, safeCost(completion.usage, completion.model)));
+    const actual = billable(completion.usage, completion.model, ceiling);
     const debited = this.swarm.debit(agentId, actual, "inference", `infer:${newId()}`, completion.model);
     if (!debited.ok) return { skipped: true, reason: debited.error };
     const toolCalls: ToolCall[] = completion.toolCalls.slice(0, 4).map((call) => ({
@@ -49,12 +49,18 @@ export class InferenceGateway {
     if (!review.allowed) return { ok: false, error: review.reason };
     const models = this.config.councilModels;
     if (models.length === 0) return { ok: false, error: "No council models are configured." };
-    const reserve = this.config.councilFeeUnits + (models.length + 1) * this.config.inferenceReserveUnits;
+    const snapshot = this.swarm.snapshot(agentId);
+    const voiceCeilings: number[] = [];
+    for (const model of models) voiceCeilings.push(await this.authorizationCeiling(model, []));
+    const synthCeiling = await this.authorizationCeiling(snapshot.model, []);
+    const reserve = this.config.councilFeeUnits + voiceCeilings.reduce((sum, item) => sum + item, 0) + synthCeiling;
     const allowed = this.swarm.authorize(agentId, reserve, "council");
     if (!allowed.ok) return allowed;
     const voices: string[] = [];
     let spent = this.config.councilFeeUnits;
-    for (const model of models) {
+    for (let index = 0; index < models.length; index += 1) {
+      const model = models[index] ?? "";
+      const ceiling = voiceCeilings[index] ?? synthCeiling;
       try {
         const reply = await this.llm.complete({
           model,
@@ -64,12 +70,11 @@ export class InferenceGateway {
           ],
         });
         voices.push(`${model}: ${reply.content}`);
-        spent += Math.min(this.config.inferenceReserveUnits, Math.max(1, safeCost(reply.usage, model)));
+        spent += billable(reply.usage, model, ceiling);
       } catch (error) {
         voices.push(`${model}: unavailable (${error instanceof Error ? error.message : "error"})`);
       }
     }
-    const snapshot = this.swarm.snapshot(agentId);
     let synthesis = voices.join("\n");
     try {
       const synth = await this.llm.complete({
@@ -80,7 +85,7 @@ export class InferenceGateway {
         ],
       });
       synthesis = synth.content || synthesis;
-      spent += Math.min(this.config.inferenceReserveUnits, Math.max(1, safeCost(synth.usage, snapshot.model)));
+      spent += billable(synth.usage, snapshot.model, synthCeiling);
     } catch {
       synthesis = voices.join("\n");
     }
@@ -92,6 +97,18 @@ export class InferenceGateway {
       ok: true,
       value: checked.allowed ? synthesis : "The council answer was withheld because it broke the constitution.",
     };
+  }
+
+  /** A JSON turn can pay for a second call, so it is reserved at twice the single-call cap. */
+  private async authorizationCeiling(model: string, tools: unknown[]): Promise<number> {
+    const reserve = this.config.inferenceReserveUnits;
+    let mayRetry = true;
+    try {
+      if (this.llm.mayRetry) mayRetry = await this.llm.mayRetry({ model, tools });
+    } catch {
+      mayRetry = true;
+    }
+    return mayRetry ? reserve * 2 : reserve;
   }
 }
 
@@ -111,4 +128,12 @@ function safeCost(usage: { promptTokens: number; completionTokens: number; costU
   } catch {
     return 1;
   }
+}
+
+function billable(
+  usage: { promptTokens: number; completionTokens: number; costUsd?: string },
+  model: string,
+  ceiling: number,
+): number {
+  return Math.min(ceiling, Math.max(1, safeCost(usage, model)));
 }

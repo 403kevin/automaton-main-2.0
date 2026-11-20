@@ -62,6 +62,19 @@ export interface ServiceOffer {
   body: string;
 }
 
+export interface PublishedPage {
+  slug: string;
+  markdown: string;
+  updatedAt: number;
+}
+
+export interface ServedEndpoint {
+  name: string;
+  priceUnits: number;
+  snapshotHash: string;
+  updatedAt: number;
+}
+
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
 export interface ChatMessage {

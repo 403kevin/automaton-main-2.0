@@ -87,8 +87,6 @@ export class DockerRuntime implements AgentRuntime {
       "128",
       "--network",
       this.config.dockerNetwork,
-      "--add-host",
-      "orchestrator:host-gateway",
       "-e",
       `AGENT_ID=${spec.id}`,
       "-e",
@@ -110,6 +108,7 @@ export class DockerRuntime implements AgentRuntime {
     } else {
       args.push("--mount", `type=bind,source=${spec.workspace},target=/workspace`);
     }
+    args.push("-v", `${this.config.refDir}:/ref:ro`);
     args.push(this.config.agentImage, "node", "/app/dist/agent/main.js");
     const { stdout } = await exec(this.docker[0], [...this.docker.slice(1), ...args], { timeout: 60_000 });
     return { containerId: stdout.trim() || name };
@@ -147,6 +146,10 @@ export async function createRuntime(config: AppConfig, boot: BootFn): Promise<Ag
   }
   if (docker && (await hasImage(docker, config.agentImage))) return new DockerRuntime(config, docker);
   return new ProcessRuntime(boot);
+}
+
+export async function detectDockerBinary(): Promise<string[] | null> {
+  return dockerCommand();
 }
 
 async function dockerCommand(): Promise<string[] | null> {

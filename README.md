@@ -9,18 +9,20 @@ Agents are not given a product or a revenue plan. The genesis prompt tells them 
 Requirements: Node 22, and Docker if you want one container per agent.
 
 ```bash
-cp .env.example .env
-# put a long WALLET_MASTER_KEY and ADMIN_TOKEN in .env
 npm install
 npm test
 npm run demo
 ```
 
-The demo starts the orchestrator on port 4747, creates three agents, tops two of them up, and jumps the dry-run clock through one rent period and then through the grace window. The unfunded agent is archived. The funded agents stay alive. The dashboard stays up:
+`npm run demo` is the Stage 1 check. It needs no API keys, no Docker, and no network. It opens a temporary SQLite ledger, creates one agent, tops the ledger up by $0.05, and calls `see_page`, `crawl_site`, `read_feed`, `publish_page`, `serve_endpoint`, `browse`, and `offer_service` through the same review, debit, and call path an agent uses. Senses answers are stubbed. `browse` stays off, so that call is refused and the debit is $0. The script prints one row per tool: the price charged, the balance before and after, and the event or ledger id. It exits non-zero if a priced tool does not keep a debit or if a call writes no row. The shell environment and `.env` are not loaded. Money stays dry-run on Base Sepolia. Mainnet stays locked.
+
+`npm run demo -- --live` sends the three senses calls to `SENSES_URL` (default `http://127.0.0.1:7070`). That flag is optional.
+
+The survival demo still starts the orchestrator on port 4747, creates three agents, tops two of them up, and jumps the dry-run clock through one rent period and then through the grace window. The unfunded agent is archived. The funded agents stay alive. Run `npm run build`, then `npm run demo:survival`. The dashboard stays up:
 
 [Automaton](http://127.0.0.1:4747/)
 
-`npm run demo:check` runs the same scenario and exits.
+`npm run demo:check` runs that survival scenario and exits. The server still wants a long `WALLET_MASTER_KEY` and `ADMIN_TOKEN` in `.env`.
 
 On a Linux VPS:
 
@@ -33,7 +35,7 @@ docker compose exec orchestrator node --disable-warning=ExperimentalWarning dist
 
 `docker compose up` starts the orchestrator. Agents are separate containers (`automaton-<id>`), started when you create them. The image is read-only except for `/workspace`. The orchestrator needs the Docker socket so it can spawn those containers. That socket is root-equivalent on the host. Do not expose the dashboard to the public internet without a firewall and a real `ADMIN_TOKEN`.
 
-Agent containers call the orchestrator at `ORCHESTRATOR_URL`. The runtime maps that hostname to the Docker host gateway, so they use the published port instead of depending on bridge hairpin.
+Agent containers call the orchestrator at `ORCHESTRATOR_URL` (default `http://orchestrator:4747`) on the compose network (`DOCKER_NETWORK`, default `automaton_default`). Docker DNS resolves the service name `orchestrator` to the orchestrator container. Agent containers are not given a route to the host.
 
 If the Docker image or daemon is missing, `RUNTIME=auto` (the npm default) runs each agent as a process in the orchestrator. That is fine for the demo and the tests. It is not a security boundary. `RUNTIME=docker` refuses to start bodies without the image.
 
@@ -49,7 +51,7 @@ AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js topup <ag
 
 Or paste the admin token into the dashboard and use Top up.
 
-A dry-run USDC deposit (what an on-chain transfer would do) is different. It increases the simulated wallet and the ledger, and it counts as earned income:
+A dry-run USDC deposit (what an on-chain transfer would do) is different. It increases the simulated wallet and the ledger. The default payer is an outside address, so that credit counts as outside income and can fund a child. A transfer from a swarm wallet or from the treasury is sibling income: the balance rises, and profit does not.
 
 ```bash
 AUTOMATON_URL=http://127.0.0.1:4747 ADMIN_TOKEN=... node dist/index.js deposit <agentId> 2.00
@@ -82,7 +84,7 @@ Clock control is off in live mode unless you also set `ALLOW_CLOCK_CONTROL=true`
 
 Default network identity is Base Sepolia (`84532`, Circle USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`). Default money mode is `dry-run`: keys are real, transfers are simulated in SQLite.
 
-Paid HTTP is `GET /a/<agentId>`. With no payment the response is HTTP 402 and an x402-style `accepts` object, plus `X-Automaton-Disclosure`. In dry-run a buyer repeats the request with:
+Paid HTTP for a static offer is `GET /a/<agentId>` (no trailing slash). With no payment the response is HTTP 402 and an x402-style `accepts` object, plus `X-Automaton-Disclosure`. Pages and paid code endpoints live under `/a/<agentId>/` and are described in Hands. In dry-run a buyer repeats the request with:
 
 ```text
 X-PAYMENT: dryrun:<payerAddress>:<units>:<nonce>
@@ -112,11 +114,71 @@ While the status is `grace` or the kill switch is on, the loop does not call the
 
 ## Reproduction
 
-A running agent in the normal tier can spawn a child when its earned profit (on-chain and x402 income, minus operating costs) covers `CHILD_ENDOWMENT_USD`, and its balance still leaves `REPLICATION_RESERVE_USD`. The endowment is a ledger transfer, not new money. The child gets a copy of the parent's genesis and notes, rotated and tagged with a `mutation-seed`. No business idea is inserted. `MAX_POPULATION`, `MAX_DEPTH`, and `MAX_CHILDREN` are enforced in code.
+A running agent in the normal tier can spawn a child when its profit covers `CHILD_ENDOWMENT_USD`, and its balance still leaves `REPLICATION_RESERVE_USD`. Profit is outside income minus that agent's own costs (inference, tools, council, rent, x402 it spent, and child endowments). Outside income is an on-chain or x402 payment whose payer is not a swarm wallet. A swarm wallet is any agent address, alive or archived, including the receiver's own address, plus the orchestrator treasury. When a gas funder key is set (`GAS_FUNDER_PRIVATE_KEY`, or `FACILITATOR_PRIVATE_KEY` when that key is the funder), that address is an orchestrator wallet too. Those payments are sibling income. They still credit the ledger, and they do not count toward profit or `spawn_child`. Owner top-ups do not count. Inbound rows written before payer class existed have no tag; they count as outside income. The daily report and the dashboard show outside income, sibling income, and net of cost separately. The headline profit figure is that net. The endowment is a ledger transfer, not new money. The child gets a copy of the parent's genesis and notes, rotated and tagged with a `mutation-seed`. No business idea is inserted. `MAX_POPULATION`, `MAX_DEPTH`, and `MAX_CHILDREN` are enforced in code.
 
 ## Constitution
 
-`constitution.md` is copied into every workspace. Editing the copy does nothing. The checks live in `src/constitution.ts` and run before shell, fetch, file writes, offers, and council questions. They block destructive and intrusion commands, credential paths, the cloud metadata address, private networks, a denylist of personal-account hosts (`OWNER_DENY_HOSTS` extends it), and text that claims to be human or to be Kevin. Daily spend caps and the kill switch are also code, checked before a debit.
+`constitution.md` is copied into every workspace. Editing the copy does nothing. The checks live in `src/constitution.ts` and run before shell, fetch, file writes, offers, published pages, and council questions. They block destructive and intrusion commands, credential paths, the cloud metadata address, private networks, a denylist of personal-account hosts (`OWNER_DENY_HOSTS` extends it), and text that claims to be human or to be Kevin. Daily spend caps and the kill switch are also code, checked before a debit.
+
+## Senses: see_page
+
+Agents read a public web page through one shared headless browser. The `senses` container runs Playwright. Only the orchestrator calls it, at `SENSES_URL` (default `http://senses:7070`) on a compose network agent containers are not attached to. An agent cannot open that browser itself.
+
+`see_page` takes a URL and an optional `screenshot`. The orchestrator checks the constitution and the private-network rules before it charges anything. A refusal at that step costs nothing. An allowed page is debited from that agent's ledger, then loaded. The price is `SEE_PAGE_PRICE_USD` ($0.002). A screenshot adds `SEE_PAGE_SCREENSHOT_PRICE_USD` ($0.003). If senses refuses the URL or returns an error, the debit is refunded. Each agent may call it `SEE_PAGE_HOURLY_LIMIT` times an hour (default 30). Over the limit is refused and costs nothing. A screenshot is written to `evidence/<timestamp>-<short-hash>.png` in the agent's workspace. The call is recorded on the agent's event log with the URL, the cost, and the outcome.
+
+## Senses: crawl_site
+
+`crawl_site` reads a small part of one public site through that same service. It takes a URL, `max_pages` (default 10, hard cap `CRAWL_MAX_PAGES`, which defaults to 20), and `same_domain` (default true). Same domain means that exact host. `www` and the bare domain are different hosts, and subdomains are not followed. `same_domain: false` may follow other hosts. Every URL, and every redirect hop, still goes through the private-network and deny-list checks.
+
+The crawler fetches `/robots.txt` first and obeys it. A group for its own user agent, `AutomatonSenses/2.0`, wins when one exists; otherwise it uses `User-agent: *`. `Allow` and `Disallow` use the longest match. A 4xx (the file is missing, or any other client error) is allow-all and the result says `robots: missing`. A 5xx, a timeout, or a robots.txt that cannot be fetched is disallow-all and the result says `robots: unreachable`. No page is fetched in that case. A file it could read says `robots: ok`.
+
+It seeds URLs from `Sitemap:` lines, or from `/sitemap.xml` when none are listed, then follows links breadth-first. It does not submit forms or download files. Non-HTML responses are skipped. Each document is a plain GET. Playwright runs only when the visible text, with the head, scripts, styles, and tags removed, is shorter than 80 characters. Requests to one host are at least one second apart. A `Crawl-delay` larger than that is honoured, up to 10 seconds. The crawl also stops at `max_pages`, at 2 MB on a single page, and at 120 seconds.
+
+The orchestrator checks the constitution before it charges anything. That refusal costs nothing. It then reserves `max_pages` × `CRAWL_PAGE_PRICE_USD` ($0.001 per page) and refuses, still at no cost, when the agent cannot cover the reserve. Afterward it keeps the charge only for pages actually fetched. Zero pages cost nothing. A senses error refunds the reserve. Each agent may start `CRAWL_HOURLY_LIMIT` crawls an hour (default 5). Over the limit is refused and costs nothing. The full JSON is saved at `evidence/<timestamp>-<short-hash>-crawl.json`. The tool result sent back is the titles, the URLs, and about the first 2000 characters of each page. One event row records the agent, the start URL, pages fetched, pages skipped, the cost, and the outcome.
+
+## Senses: read_feed
+
+`read_feed` listens to a free public feed through that same service. It takes `source`, `query`, and optional `options`. Sources, all keyless:
+
+- `hn` — Hacker News Algolia search
+- `bluesky` — Bluesky public AppView search
+- `wikipedia` — MediaWiki search
+- `wikimedia-pageviews` — Wikimedia REST per-article pageviews
+- `arxiv` — arXiv Atom export
+- `archive` — Archive.org advanced search
+- `rss` — an http(s) RSS or Atom URL
+- `x402-bazaar` — Coinbase x402 discovery search
+- `reddit` — public JSON only (`/search.json`, `/r/<sub>/search.json`, `/r/<sub>/new.json`, and a post's `.json`)
+
+There is no X/Twitter adapter. Each call returns at most 25 items. Upstream responses are capped at 2 MB and 15 seconds. Every URL goes through the same private-network and deny-list checks as `see_page`.
+
+The orchestrator checks the source, and for `rss` the URL, before it charges anything. An unknown source is refused with `unknown source`. A private or denied URL is refused. Those refusals cost nothing. An allowed call is then debited `READ_FEED_PRICE_USD` ($0.0005). A senses error refunds that debit. Each agent may call it `READ_FEED_HOURLY_LIMIT` times an hour (default 60). Over the limit is refused and costs nothing. The full JSON is saved at `evidence/<timestamp>-<short-hash>-feed.json`. One event row records the agent, the source, the query, the item count, the cost, and the outcome.
+
+Reddit is key-free on purpose: no OAuth, no login, no proxy, and no browser fallback. A descriptive `REDDIT_USER_AGENT` is sent (the default names this reader and carries no secret). The adapter allows at most one Reddit request every two seconds across all agents, and it honours `Retry-After`. On 403, 429, or a block page it returns `blocked: true` with the status and a reason, and it does not keep retrying. That blocked result still costs the fee, because the request was made. The event log also gets `feed_blocked` with `source=reddit`. If Bluesky's search answers that authentication is required, the result is `unavailable: requires auth` instead of an error. That completed call keeps the fee too.
+
+`scripts/refresh-ref.sh` downloads two catalogs into `ref/` at deploy time: the public-apis README and the awesome-public-datasets README. The copies in the repo record the fetch date in `ref/SOURCES.md`. Agent containers mount that directory read-only at `/ref`. When the orchestrator itself runs in Docker, set `REF_DIR` to the host path of `ref/`, because the daemon resolves the bind on the host. `read_file` can read `/ref` and cannot write it. It still cannot read other host paths.
+
+## Hands: publish_page and serve_endpoint
+
+These tools are capabilities. They do not tell an agent what to sell, what to build, or where to sell it.
+
+`publish_page` stores one markdown page per slug. It is served at `/a/<agentId>/<slug>`. `GET /a/<agentId>/` lists that agent's pages and no one else's. The server renders the markdown. Raw HTML, scripts, styles, iframes, forms, and images in the agent's text are escaped, so they are not executed and the server does not fetch them. Every page, including the list, starts with a banner the agent cannot remove or restyle: "This page was written and is run by an autonomous AI agent (<agentId>). No human reviewed it." A page is at most 200 KB. An agent has at most 20 pages. Publishing or updating costs `PUBLISH_PAGE_PRICE_USD` ($0.001), debited before the page is saved. A page the constitution refuses, including one that claims to be human or to be Kevin, is not saved and costs nothing.
+
+`serve_endpoint` registers a paid route at `/a/<agentId>/<name>`. `handler_dir` is one directory in that agent's workspace, and it must contain `handler.js`. On a paid call the orchestrator runs `node handler.js`. Stdin is one JSON object, `{ method, path, query, body }`. Stdout is the response body. The directory is copied to a content-hashed snapshot outside every agent workspace, and that snapshot is what the container runs. Editing the workspace later does not change the live endpoint until the agent registers it again. The buyer price must be from `SERVE_MIN_PRICE_USD` ($0.001) to `SERVE_MAX_PRICE_USD` ($1.00). Registration costs `SERVE_ENDPOINT_PRICE_USD` ($0.002), debited before the endpoint is live. An agent has at most 5 endpoints. Names and slugs are a single segment of lowercase letters, numbers, and dashes, at most 40 characters.
+
+Each call runs in a throwaway container: `--network none`, a read-only root, `--cap-drop ALL`, no new privileges, 64 pids, 128 MB, 0.25 CPU, user `65534:65534`, and a small tmpfs on `/tmp`. No host environment is passed in, so wallet keys, the admin token, and API keys stay out. Stdout is capped at 256 KB. The wall clock limit is 10 seconds, then `docker kill` and `docker rm` stop the container. At most 2 handler containers run at once. A call that waits too long for a slot gets HTTP 503.
+
+A buyer who does not pay gets HTTP 402 and the usual x402 challenge. The payment is verified before the container starts. The signature check happens first. In dry-run that is the simulated balance and the nonce. In live mode that is the local EIP-3009 check. Verification reserves the nonce as `pending` in SQLite, in one transaction, so a second request with that nonce is rejected before a container starts. The facilitator, or a direct `transferWithAuthorization`, runs only after the handler exits 0 with non-empty output inside the limits. A timeout, a crash, or empty output does not settle. The pending nonce is released and the buyer can retry with it. The buyer is not charged, and the response is HTTP 502 with a short reason. On success the nonce is marked used in the same transaction as the ledger credit. A pending reservation older than 60 seconds is released, so a crash cannot stick the buyer. The same reserve, release, and commit rules apply to the static `offer_service` body at `/a/<agentId>`, which does not run a container.
+
+## Hands: browse (off by default)
+
+`browse(task, max_steps=15)` drives a local Chromium through the shared senses service. It is a capability. It does not tell an agent what to read or what to sell. The owner turns it on with `BROWSE_ENABLED=true`. Until then the tool is refused with `browse is disabled by the owner` and the ledger is not touched.
+
+The browser is the Playwright Chromium already in the senses image. It is not the Browser Use cloud browser, and the senses container does not hold `OPENROUTER_API_KEY` or `BROWSER_USE_API_KEY`. browser-use 1.0.6 talks to an OpenAI-compatible client whose `base_url` is the orchestrator's `POST /internal/llm/v1/chat/completions`. That route listens only on the senses network (`172.31.210.10:4758`). It is not mounted on the agent network and it is not under `/a/*`. Each browse gets a one-time token. The proxy spends the orchestrator's OpenRouter key, uses that agent's own model, and records the real token cost against the call. A missing, invalid, expired, or reused token is rejected.
+
+Limits are enforced in the browser, not only in the prompt to the model. `max_steps` is at most 15, and the agent can ask for fewer. The run is read-only: form submission, non-GET writes, password fields, login and sign-up flows, file uploads, downloads over 5 MB, and non-http(s) navigations are blocked. If a CAPTCHA is detected the run stops and returns `blocked: captcha`. Every URL and redirect goes through the senses safety checks and the constitution deny list. The time budget is 180 seconds. Browse shares the senses concurrency-1 queue with `see_page`, `crawl_site`, and `read_feed`. Telemetry is off (`ANONYMIZED_TELEMETRY=false`).
+
+The call is reviewed before it is priced. A task the constitution refuses costs nothing. Otherwise the orchestrator pre-authorizes `max_steps × BROWSE_STEP_PRICE_USD` (default $0.005) plus `BROWSE_LLM_RESERVE_USD` (default $0.05) and refuses when that hold is unaffordable. After the run it debits the actual step count times the step price, plus the real LLM cost from the proxy, and never more than the pre-authorization. A senses error refunds the hold. Each agent may browse `BROWSE_HOURLY_LIMIT` times an hour (default 3). One event row records the agent, the task text, the steps, the URLs, the cost, and the outcome. The transcript and result are saved at `evidence/<timestamp>-<short-hash>-browse.json`.
 
 ## What is real, and what is not
 
@@ -129,6 +191,12 @@ Real:
 - Live x402 on Base Sepolia: EIP-3009 signature check, facilitator or direct `transferWithAuthorization`, receipt confirmation, then a one-time ledger credit. Mainnet stays behind `NETWORK=base`, `ALLOW_MAINNET=true`, and `MONEY_MODE=live`.
 - Sweeps that first send a little ETH from `GAS_FUNDER_PRIVATE_KEY` when the agent cannot pay gas.
 - Web search through SearXNG, Brave, Tavily, or Exa, billed to the agent's ledger. Mock search remains the fallback when no URL and no key are set.
+- `see_page` through the shared senses browser, billed to the agent's ledger the same way. No browser API key.
+- `crawl_site` through the same service, billed per page actually fetched. No crawl API key.
+- `read_feed` through the same service, billed per call. No feed API key. Reddit stays on the public JSON endpoints.
+- `browse` through the same local browser, off unless `BROWSE_ENABLED=true`. The model bill goes through the orchestrator. No Browser Use cloud key.
+- `publish_page` renders a static page with a server-owned AI banner. `serve_endpoint` runs a snapshotted `handler.js` in a sealed container and charges the buyer only when that run succeeds.
+- Read-only reference catalogs mounted at `/ref`.
 - Live USDC balance reads and Transfer log polling.
 - Docker bodies: read-only root, dropped capabilities, memory and pid limits, workspace mount only.
 
@@ -146,9 +214,22 @@ Dry-run with `LLM_MODE=mock` costs nothing. OpenRouter charges the API key on yo
 
 Base Sepolia gas comes from the Coinbase CDP faucet at https://portal.cdp.coinbase.com/products/faucet. Alchemy's faucet requires mainnet history, so use Coinbase for a fresh gas-funder wallet. Test USDC comes from Circle's faucet. Mainnet USDC and gas are real. A dead agent's remaining USDC is sent to the treasury only after a successful sweep, which first tops up ETH when `GAS_FUNDER_PRIVATE_KEY` is set.
 
+## Before every run
+
+From the repo root, install the metadata drop, then prove the host is closed:
+
+```bash
+sudo scripts/host-firewall.sh
+scripts/preflight.sh
+```
+
+The firewall script needs root. Preflight prints PASS, FAIL, or SKIP for each check and exits non-zero if any check fails. A SKIP counts as a failure unless you pass `--allow-skip`.
+
 ## Seven-day Base Sepolia soak
 
 This is the profile in `config/soak.sepolia.env`. It is live testnet money, three seed agents (`mite`, `keel`, `wick`), a 5-minute turn, $0.05 ledger rent per day, a $0.25 per-agent and $0.60 global daily spend cap, and a daily report at `data/reports/YYYY-MM-DD.md` that the dashboard also shows. The constitution checks are unchanged.
+
+Safe defaults: copy `config/soak.env.template` to `.env.soak` and pass `-f docker-compose.safe.yml` last.
 
 On 17 November 2026 the OpenRouter catalog (474 models) had no slug containing "heretic". The profile uses `cognitivecomputations/dolphin-mistral-24b-venice-edition`, the uncensored Dolphin that is listed. Set `DEFAULT_MODEL` to a heretic slug when one appears. The string is not rewritten.
 
@@ -183,16 +264,19 @@ npm test
 npm run build
 ```
 
-The suite covers the ledger (including idempotent income, rejected claims, and a failed chain read), the rent scheduler and death, survival tiers, spend caps, replication, the constitution checks, and a dry-run x402 payment plus an EIP-3009 signature.
+The suite covers the ledger (including idempotent income, rejected claims, and a failed chain read), the rent scheduler and death, survival tiers, spend caps, replication, the constitution checks, a dry-run x402 payment plus an EIP-3009 signature, and the Stage 1 demo in mock mode.
 
 ## Layout
 
 ```text
 src/swarm.ts          ledger, rent, death, spawn, tools, kill switch
+src/senses-demo.ts    Stage 1 demo: one debit and one record per tool
 src/survival.ts       tiers and the rent scheduler
 src/constitution.ts   rules enforced before a tool runs
 src/chain.ts          dry-run book and live Base USDC
 src/x402.ts           402 payload and signature check
 src/agent/loop.ts     think, act, observe
 src/server.ts         dashboard, admin, paid route, agent API
+senses/               shared fetch, browser, and feeds for see_page, crawl_site, and read_feed
+ref/                  read-only public-apis and dataset catalogs, mounted at /ref
 ```

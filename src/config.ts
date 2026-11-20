@@ -1,5 +1,10 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { isAddress } from "viem";
+import { selectHandlerImage } from "./handlers.js";
 import { parseUsd } from "./money.js";
+
+const DEFAULT_REDDIT_USER_AGENT = "AutomatonSenses/2.0 (key-free public JSON reader; no OAuth)";
 
 export type MoneyMode = "dry-run" | "live";
 export type NetworkName = "base-sepolia" | "base";
@@ -63,6 +68,33 @@ export interface AppConfig {
   denyHosts: string[];
   turnIntervalMs: number;
   constitutionPath: string;
+  sensesUrl: string;
+  seePagePriceUnits: number;
+  seePageScreenshotPriceUnits: number;
+  seePageHourlyLimit: number;
+  crawlPagePriceUnits: number;
+  crawlHourlyLimit: number;
+  crawlMaxPages: number;
+  readFeedPriceUnits: number;
+  readFeedHourlyLimit: number;
+  redditUserAgent: string;
+  browseEnabled: boolean;
+  browseStepPriceUnits: number;
+  browseLlmReserveUnits: number;
+  browseHourlyLimit: number;
+  browseMaxSteps: number;
+  sensesLlmBaseUrl: string;
+  internalLlmPort: number;
+  internalLlmHost: string;
+  internalLlmAllowCidrs: string[];
+  refDir: string;
+  publishPagePriceUnits: number;
+  serveEndpointPriceUnits: number;
+  serveMinPriceUnits: number;
+  serveMaxPriceUnits: number;
+  handlerTimeoutMs: number;
+  handlerQueueTimeoutMs: number;
+  handlerImage: string;
   toolCosts: Record<string, number>;
 }
 
@@ -92,6 +124,12 @@ function integer(value: string | undefined, fallback: number, name: string): num
   return Math.floor(parsed);
 }
 
+function atLeast(value: string | undefined, fallback: number, min: number, name: string): number {
+  const parsed = integer(value, fallback, name);
+  if (parsed < min) throw new Error(`${name} must be at least ${min}.`);
+  return parsed;
+}
+
 function privateKey(value: string | undefined, name: string): `0x${string}` | undefined {
   if (!value) return undefined;
   const prefixed = value.startsWith("0x") ? value : `0x${value}`;
@@ -110,6 +148,15 @@ function wei(value: string | undefined, fallback: bigint, name: string): bigint 
   } catch {
     throw new Error(`${name} must be a non-negative integer number of wei.`);
   }
+}
+
+function headerValue(value: string | undefined, fallback: string): string {
+  const cleaned = (value ?? "").replace(/[\r\n]/g, "").trim();
+  return cleaned || fallback;
+}
+
+function defaultRefDir(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "ref");
 }
 
 function usd(value: string | undefined, fallback: string, name: string): number {
@@ -186,6 +233,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (lowMin > normalMin) {
     throw new Error("LOW_MIN_USD cannot be above NORMAL_MIN_USD.");
   }
+  const serveMinPriceUnits = usd(env.SERVE_MIN_PRICE_USD, "0.001", "SERVE_MIN_PRICE_USD");
+  const serveMaxPriceUnits = usd(env.SERVE_MAX_PRICE_USD, "1.00", "SERVE_MAX_PRICE_USD");
+  if (serveMinPriceUnits <= 0) throw new Error("SERVE_MIN_PRICE_USD must be positive.");
+  if (serveMaxPriceUnits < serveMinPriceUnits) {
+    throw new Error("SERVE_MAX_PRICE_USD cannot be below SERVE_MIN_PRICE_USD.");
+  }
+  const agentImage = env.AGENT_IMAGE ?? "automaton:2";
+  const publishPagePriceUnits = usd(env.PUBLISH_PAGE_PRICE_USD, "0.001", "PUBLISH_PAGE_PRICE_USD");
+  const serveEndpointPriceUnits = usd(env.SERVE_ENDPOINT_PRICE_USD, "0.002", "SERVE_ENDPOINT_PRICE_USD");
   const councilModels = (env.COUNCIL_MODELS ?? "meta-llama/llama-3.1-8b-instruct,qwen/qwen-2.5-7b-instruct")
     .split(",")
     .map((item) => item.trim())
@@ -232,7 +288,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     runtime: runtimeRaw,
     dockerNetwork: env.DOCKER_NETWORK ?? "automaton_default",
     dockerVolume: env.DOCKER_VOLUME ?? "",
-    agentImage: env.AGENT_IMAGE ?? "automaton:2",
+    agentImage,
     orchestratorUrl: env.ORCHESTRATOR_URL ?? "http://orchestrator:4747",
     searchProvider: searchRaw as AppConfig["searchProvider"],
     searxngUrl: env.SEARXNG_URL ?? "",
@@ -252,13 +308,52 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       .filter(Boolean),
     turnIntervalMs: integer(env.TURN_INTERVAL_MS, 15_000, "TURN_INTERVAL_MS"),
     constitutionPath: env.CONSTITUTION_PATH ?? "constitution.md",
+    sensesUrl: env.SENSES_URL || "http://senses:7070",
+    seePagePriceUnits: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
+    seePageScreenshotPriceUnits: usd(env.SEE_PAGE_SCREENSHOT_PRICE_USD, "0.003", "SEE_PAGE_SCREENSHOT_PRICE_USD"),
+    seePageHourlyLimit: integer(env.SEE_PAGE_HOURLY_LIMIT, 30, "SEE_PAGE_HOURLY_LIMIT"),
+    crawlPagePriceUnits: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
+    crawlHourlyLimit: integer(env.CRAWL_HOURLY_LIMIT, 5, "CRAWL_HOURLY_LIMIT"),
+    crawlMaxPages: integer(env.CRAWL_MAX_PAGES, 20, "CRAWL_MAX_PAGES"),
+    readFeedPriceUnits: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
+    readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
+    redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
+    browseEnabled: env.BROWSE_ENABLED === "true",
+    browseStepPriceUnits: usd(env.BROWSE_STEP_PRICE_USD, "0.005", "BROWSE_STEP_PRICE_USD"),
+    browseLlmReserveUnits: usd(env.BROWSE_LLM_RESERVE_USD, "0.05", "BROWSE_LLM_RESERVE_USD"),
+    browseHourlyLimit: integer(env.BROWSE_HOURLY_LIMIT, 3, "BROWSE_HOURLY_LIMIT"),
+    browseMaxSteps: Math.min(15, Math.max(1, integer(env.BROWSE_MAX_STEPS, 15, "BROWSE_MAX_STEPS"))),
+    sensesLlmBaseUrl:
+      env.SENSES_LLM_BASE_URL ||
+      `http://127.0.0.1:${integer(env.INTERNAL_LLM_PORT, 4758, "INTERNAL_LLM_PORT")}/internal/llm/v1`,
+    internalLlmPort: integer(env.INTERNAL_LLM_PORT, 4758, "INTERNAL_LLM_PORT"),
+    internalLlmHost: (env.INTERNAL_LLM_HOST || "127.0.0.1").trim(),
+    internalLlmAllowCidrs: (env.INTERNAL_LLM_ALLOW_CIDRS ?? "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+    refDir: path.resolve(env.REF_DIR && env.REF_DIR.trim() ? env.REF_DIR : defaultRefDir()),
+    publishPagePriceUnits,
+    serveEndpointPriceUnits,
+    serveMinPriceUnits,
+    serveMaxPriceUnits,
+    handlerTimeoutMs: atLeast(env.HANDLER_TIMEOUT_MS, 10_000, 1, "HANDLER_TIMEOUT_MS"),
+    handlerQueueTimeoutMs: atLeast(env.HANDLER_QUEUE_TIMEOUT_MS, 10_000, 1, "HANDLER_QUEUE_TIMEOUT_MS"),
+    handlerImage:
+      (env.HANDLER_IMAGE ?? "").trim() || selectHandlerImage(agentImage, env.AGENT_IMAGE_HAS_NODE !== "false"),
     toolCosts: {
       shell: parseUsd("0.001"),
       fetch_url: parseUsd("0.001"),
       web_search: usd(env.SEARCH_COST_USD, "0.002", "SEARCH_COST_USD"),
+      see_page: usd(env.SEE_PAGE_PRICE_USD, "0.002", "SEE_PAGE_PRICE_USD"),
+      crawl_site: usd(env.CRAWL_PAGE_PRICE_USD, "0.001", "CRAWL_PAGE_PRICE_USD"),
+      read_feed: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
+      browse: 0,
       write_file: parseUsd("0.0001"),
       read_file: parseUsd("0.0001"),
       offer_service: parseUsd("0.001"),
+      publish_page: publishPagePriceUnits,
+      serve_endpoint: serveEndpointPriceUnits,
       remember: parseUsd("0.0001"),
       balance: 0,
       council: 0,

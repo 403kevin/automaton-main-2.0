@@ -1,0 +1,6 @@
+{
+  "items": [
+    { "project": "en.wikipedia", "article": "Cat", "granularity": "daily", "timestamp": "2026110100", "views": 10 },
+    { "project": "en.wikipedia", "article": "Cat", "granularity": "daily", "timestamp": "2026110200", "views": 12 }
+  ]
+}

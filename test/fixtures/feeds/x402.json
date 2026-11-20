@@ -1,0 +1,13 @@
+{
+  "partialResults": false,
+  "resources": [
+    {
+      "resource": "https://example.com/weather",
+      "serviceName": "Weather",
+      "description": "  A public forecast.  ",
+      "lastUpdated": "2026-11-01T00:00:00.000Z",
+      "accepts": [{ "payTo": "0x1111111111111111111111111111111111111111", "amount": "1000" }],
+      "quality": { "l30DaysTotalCalls": 4 }
+    }
+  ]
+}

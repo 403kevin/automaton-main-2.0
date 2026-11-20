@@ -1,0 +1,21 @@
+{
+  "hits": [
+    {
+      "objectID": "123",
+      "title": "Show HN: Ears",
+      "url": "https://example.com/ears",
+      "story_text": "  Listen to public feeds.  ",
+      "author": "pg",
+      "points": 42,
+      "created_at": "2026-11-01T00:00:00.000Z"
+    },
+    {
+      "objectID": "124",
+      "story_title": "Ask HN: Feeds",
+      "comment_text": "A comment.",
+      "author": "dang",
+      "points": 3,
+      "created_at": "2026-11-02T00:00:00.000Z"
+    }
+  ]
+}
