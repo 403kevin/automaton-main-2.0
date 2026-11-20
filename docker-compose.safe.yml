@@ -8,7 +8,7 @@ services:
       - "127.0.0.1:4747:4747"
     env_file: !override
       - path: .env.soak
-        required: false
+        required: true
     environment:
       MONEY_MODE: ${MONEY_MODE:-dry-run}
       WALLET_MASTER_KEY: ${WALLET_MASTER_KEY:?WALLET_MASTER_KEY is required}

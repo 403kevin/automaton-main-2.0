@@ -1,10 +1,9 @@
 import { buildApp } from "./app.js";
 import { runDemoScenario } from "./demo.js";
-import { parseUsd } from "./money.js";
 import { redact } from "./redact.js";
-import { loadEnvFile, SOAK_SEED_USD, SOAK_SEEDS } from "./soak.js";
+import { parseSoakAgentModels, seedHttp, seedLocal } from "./seed.js";
+import { loadEnvFile, SOAK_SEED_USD } from "./soak.js";
 import { startServer } from "./server.js";
-import type { Swarm } from "./swarm.js";
 
 export async function main(argv: string[]): Promise<void> {
   const [command = "serve", ...rest] = argv;
@@ -64,16 +63,17 @@ async function runSoak(startIfDown: boolean, file = "config/soak.sepolia.env"): 
   const port = env.PORT ?? "4747";
   const url = env.AUTOMATON_URL ?? `http://127.0.0.1:${port}`;
   const usd = env.SOAK_SEED_USD || SOAK_SEED_USD;
+  const agentModels = parseSoakAgentModels(env.SOAK_AGENT_MODELS);
   if (await healthy(url)) {
     if (!env.ADMIN_TOKEN) throw new Error("ADMIN_TOKEN is required to seed a server that is already running.");
-    await seedHttp(url, env.ADMIN_TOKEN, usd);
+    await seedHttp(url, env.ADMIN_TOKEN, usd, agentModels);
     console.log(`Seeded 3 agents on ${url}. Daily reports land in the data volume and on the dashboard.`);
     return;
   }
   if (!startIfDown) throw new Error(`Nothing is listening at ${url}. Start the orchestrator, or run: node dist/index.js soak`);
   const app = await buildApp(env);
   const server = await startServer(app);
-  await seedLocal(app.swarm, usd);
+  await seedLocal(app.swarm, usd, agentModels);
   app.swarm.writeDailyReport();
   console.log(`Soak is serving ${server.url}`);
   console.log(`Model ${app.config.defaultModel}. Money ${app.config.moneyMode} on ${app.config.network}.`);
@@ -82,47 +82,6 @@ async function runSoak(startIfDown: boolean, file = "config/soak.sepolia.env"): 
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-}
-
-async function seedLocal(swarm: Swarm, usd: string): Promise<void> {
-  for (const seed of SOAK_SEEDS) {
-    const existing = swarm.overview().agents.find((agent) => agent.name === seed.name && agent.status !== "archived");
-    if (existing) {
-      console.log(`${seed.name} is already ${existing.status} (${existing.id}).`);
-      continue;
-    }
-    const created = await swarm.createAgent({ name: seed.name, genesisPrompt: seed.genesis });
-    if (!created.ok) throw new Error(created.error);
-    const topped = swarm.ownerTopup(created.value.id, parseUsd(usd), `soak-seed-${seed.name}`);
-    if (!topped.ok) throw new Error(topped.error);
-    console.log(`Seeded ${seed.name} ${created.value.id} at ${created.value.address} with $${usd}.`);
-  }
-}
-
-async function seedHttp(base: string, token: string, usd: string): Promise<void> {
-  const overview = (await authed(base, token, "GET", "/api/overview")) as { agents: { id: string; name: string; status: string }[] };
-  for (const seed of SOAK_SEEDS) {
-    const existing = overview.agents.find((agent) => agent.name === seed.name && agent.status !== "archived");
-    if (existing) {
-      console.log(`${seed.name} is already ${existing.status} (${existing.id}).`);
-      continue;
-    }
-    const created = (await authed(base, token, "POST", "/admin/agents", { name: seed.name, genesisPrompt: seed.genesis })) as { id: string; address: string };
-    await authed(base, token, "POST", "/admin/topup", { agentId: created.id, usd, ref: `soak-seed-${seed.name}` });
-    console.log(`Seeded ${seed.name} ${created.id} at ${created.address} with $${usd}.`);
-  }
-}
-
-async function authed(base: string, token: string, method: string, path: string, body?: unknown): Promise<unknown> {
-  const response = await fetch(`${base}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", "X-Admin-Token": token },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(redact(payload.error || `HTTP ${response.status}`));
-  return payload;
 }
 
 async function demo(check: boolean): Promise<void> {

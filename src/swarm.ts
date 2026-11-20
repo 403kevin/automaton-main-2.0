@@ -6,7 +6,7 @@ import { isAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { ChainPort } from "./chain.js";
 import type { Clock } from "./clock.js";
-import type { AppConfig } from "./config.js";
+import { notAllowedModel, type AppConfig } from "./config.js";
 import { CONSTITUTION_TEXT, constitutionDenyHosts, reviewCommand, reviewText, reviewUrl } from "./constitution.js";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -182,6 +182,60 @@ export class Swarm {
     this.lastRentAt = Number.isFinite(parsed) ? Math.min(parsed, now) : now;
     kvSet(db, "last_rent_at", String(this.lastRentAt));
     this.killed = kvGet(db, "kill_switch") === "1";
+    this.normalizeAgentModels();
+  }
+
+  /** True when a per-agent model is on the allowed models list (a null model means the global one, and is not checked here). */
+  modelAllowed(model: string): boolean {
+    return this.config.allowedModels.includes(model);
+  }
+
+  /** At start-up, a live agent whose stored model is no longer listed goes back to the global model, with an event. */
+  private normalizeAgentModels(): void {
+    for (const agent of this.living()) {
+      const stored = [
+        ["model", agent.model],
+        ["low_model", agent.lowModel],
+        ["critical_model", agent.criticalModel],
+      ] as const;
+      for (const [column, value] of stored) {
+        if (!value || this.modelAllowed(value)) continue;
+        this.db.prepare(`UPDATE agents SET ${column} = NULL WHERE id = ?`).run(agent.id);
+        this.event(agent.id, "agent_model_reset", `${column}=${sanitizeSenseText(value).slice(0, 100)} is not on the allowed models list. Using the global model.`);
+      }
+    }
+  }
+
+  /** The owner changes an agent's models. An omitted key stays, null clears it to the global model, a string must be listed. */
+  setAgentModels(
+    agentId: string,
+    input: { model?: unknown; lowModel?: unknown; criticalModel?: unknown },
+  ): Result<{ model: string | null; lowModel: string | null; criticalModel: string | null }> {
+    const agent = getAgent(this.db, agentId);
+    if (!agent || (agent.status !== "running" && agent.status !== "grace")) return { ok: false, error: "Unknown or archived agent." };
+    const columns = { model: "model", lowModel: "low_model", criticalModel: "critical_model" } as const;
+    const next = { model: agent.model, lowModel: agent.lowModel, criticalModel: agent.criticalModel };
+    let changed = false;
+    for (const key of ["model", "lowModel", "criticalModel"] as const) {
+      const value = input[key];
+      if (value === undefined) continue;
+      if (value !== null && (typeof value !== "string" || value.trim() === "")) {
+        return { ok: false, error: `${key} must be a model id or null.` };
+      }
+      if (typeof value === "string" && !this.modelAllowed(value.trim())) return { ok: false, error: notAllowedModel(value.trim()) };
+      next[key] = typeof value === "string" ? value.trim() : null;
+      changed = true;
+    }
+    if (!changed) return { ok: false, error: "Give model, lowModel or criticalModel." };
+    for (const key of ["model", "lowModel", "criticalModel"] as const) {
+      if (input[key] !== undefined) this.db.prepare(`UPDATE agents SET ${columns[key]} = ? WHERE id = ?`).run(next[key], agentId);
+    }
+    this.event(
+      agentId,
+      "agent_model_changed",
+      `model=${next.model ?? "global"} low=${next.lowModel ?? "global"} critical=${next.criticalModel ?? "global"}`,
+    );
+    return { ok: true, value: next };
   }
 
   setRuntime(runtime: AgentRuntime): void {
@@ -295,6 +349,9 @@ export class Swarm {
     }
     if (this.living().some((agent) => agent.name === name)) {
       return { ok: false, error: `An agent named ${name} is already alive.` };
+    }
+    for (const chosen of [input.model, input.lowModel, input.criticalModel]) {
+      if (chosen != null && !this.modelAllowed(chosen)) return { ok: false, error: notAllowedModel(chosen) };
     }
     const depth = input.depth ?? 0;
     if (depth > this.config.maxDepth) {
@@ -1276,6 +1333,11 @@ export class Swarm {
         status: agent.status,
         tier,
         model: modelFor(agent, tier, this.config),
+        assigned: {
+          model: agent.model || this.config.defaultModel,
+          lowModel: agent.lowModel || this.config.lowModel,
+          criticalModel: agent.criticalModel || this.config.criticalModel,
+        },
         balanceUnits: agent.balanceUnits,
         balance: formatUsd(agent.balanceUnits),
         incomeUnits: netUnits,
@@ -1462,8 +1524,15 @@ export class Swarm {
     lines.push("");
     const names = new Map(agents.map((agent) => [agent.id, agent.name]));
     lines.push(...refusalReportLines(this.db, since, names));
+    lines.push(
+      ...modelReliabilityLines(
+        this.db,
+        since,
+        names,
+        this.living().map((agent) => ({ id: agent.id, name: agent.name, assigned: agent.model || this.config.defaultModel })),
+      ),
+    );
     lines.push(...predictionReportLines(this.db, since, names));
-    lines.push(...modelReliabilityLines(this.db, since, names));
     const markdown = lines.join("\n");
     const dir = path.join(this.config.dataDir, "reports");
     fs.mkdirSync(dir, { recursive: true });

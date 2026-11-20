@@ -337,6 +337,8 @@ async function runTurn(options: {
     LLM_MODE: "openrouter",
     OPENROUTER_API_KEY: "sk-or-test",
     INFERENCE_RESERVE_USD: "0.02",
+    // Per-agent models are gated by ALLOWED_MODELS (BO-2.4b); this test assigns its own model to the agent.
+    ALLOWED_MODELS: `org/heretic-normal,org/heretic-low,org/heretic-critical,${options.model}`,
     AGENT_DAILY_CAP_USD: "10",
     GLOBAL_DAILY_CAP_USD: "10",
   });

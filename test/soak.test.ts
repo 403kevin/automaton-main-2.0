@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import { loadConfig } from "../src/config.js";
 import { parseUsd } from "../src/money.js";
-import { loadEnvFile, SOAK_MODEL, SOAK_SEEDS } from "../src/soak.js";
+import { loadEnvFile, SOAK_SEEDS } from "../src/soak.js";
 import { harness } from "./helpers.js";
+
+const SOAK_DEFAULT_MODEL = "mistralai/mistral-small-3.2-24b-instruct";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -11,12 +13,12 @@ afterEach(() => {
 });
 
 describe("soak profile", () => {
-  it("is a conservative 7-day Base Sepolia profile with three seeds and the listed uncensored model", () => {
+  it("is a conservative 7-day Base Sepolia profile with three seeds and the tool-capable default model", () => {
     const env = loadEnvFile("config/soak.sepolia.env");
     expect(env.NETWORK).toBe("base-sepolia");
     expect(env.MONEY_MODE).toBe("live");
     expect(env.ALLOW_MAINNET).toBe("false");
-    expect(env.DEFAULT_MODEL).toBe(SOAK_MODEL);
+    expect(env.DEFAULT_MODEL).toBe(SOAK_DEFAULT_MODEL);
     expect(env.RENT_INTERVAL_MS).toBe("86400000");
     expect(env.REPORT_INTERVAL_MS).toBe("86400000");
     expect(env.SEARCH_PROVIDER).toBe("searxng");
@@ -31,7 +33,7 @@ describe("soak profile", () => {
     expect(config.network).toBe("base-sepolia");
     expect(config.moneyMode).toBe("live");
     expect(config.allowMainnet).toBe(false);
-    expect(config.defaultModel).toBe(SOAK_MODEL);
+    expect(config.defaultModel).toBe(SOAK_DEFAULT_MODEL);
     expect(config.agentDailyCapUnits).toBeLessThanOrEqual(parseUsd("0.50"));
     expect(config.globalDailyCapUnits).toBeLessThanOrEqual(parseUsd("1.00"));
     expect(config.facilitatorUrl).toBe("https://x402.org/facilitator");

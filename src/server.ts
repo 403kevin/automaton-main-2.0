@@ -134,6 +134,16 @@ async function handle(
       if (!created.ok) return send(res, 400, { error: created.error });
       return send(res, 201, { id: created.value.id, name: created.value.name, address: created.value.address, depth: created.value.depth });
     }
+    const modelRoute = /^\/admin\/agents\/(a[a-f0-9]+)\/model$/.exec(path);
+    if (req.method === "POST" && modelRoute) {
+      const changed = swarm.setAgentModels(modelRoute[1] ?? "", {
+        model: "model" in body ? body.model : undefined,
+        lowModel: "lowModel" in body ? body.lowModel : undefined,
+        criticalModel: "criticalModel" in body ? body.criticalModel : undefined,
+      });
+      if (!changed.ok) return send(res, 400, { error: changed.error });
+      return send(res, 200, changed.value);
+    }
     if (req.method === "POST" && path === "/admin/topup") {
       const topped = swarm.ownerTopup(String(body.agentId ?? ""), parseUsd(String(body.usd ?? "")), body.ref ? String(body.ref) : undefined);
       if (!topped.ok) return send(res, 400, { error: topped.error });

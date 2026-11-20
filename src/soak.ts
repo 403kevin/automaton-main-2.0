@@ -1,9 +1,6 @@
 import fs from "node:fs";
 import { DEFAULT_GENESIS } from "./genesis.js";
 
-/** Live OpenRouter catalog on 2026-11-17 had no slug containing "heretic". This is the listed uncensored model. */
-export const SOAK_MODEL = "cognitivecomputations/dolphin-mistral-24b-venice-edition";
-
 export const SOAK_SEEDS = [
   { name: "mite", genesis: DEFAULT_GENESIS },
   { name: "keel", genesis: DEFAULT_GENESIS },
