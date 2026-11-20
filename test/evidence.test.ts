@@ -374,7 +374,9 @@ describe("quarantine read-back", () => {
     expect(fenced).toMatch(OPEN);
     expect(fenced).toContain("tool=read_file");
     expect(fenced).toContain(PRODUCT);
-    expect(await readAsAgent(box, "./evidence/../evidence/note.txt")).toMatch(OPEN);
+    // Paths with ".." are refused earlier by classifyAgentPath, so check the other spellings of the same file.
+    expect(await readAsAgent(box, "./evidence/note.txt")).toMatch(OPEN);
+    expect(await readAsAgent(box, "evidence//note.txt")).toMatch(OPEN);
     fs.writeFileSync(path.join(agent.workspace, "plain.txt"), PRODUCT);
     expect(await readAsAgent(box, "plain.txt")).toBe(PRODUCT);
   });
