@@ -1,6 +1,7 @@
 # BO-2.4b — per-agent model choice, and every config variable reaches the container
 
 Spec for ORDER BO-2.4b (section 35 of `AUTOMATON_COLLAB_FOR_GROK.md`). It follows [BO-2.4](BO-2.4-model-reliability.md) and carries three things from the PR #9 review: Kevin's decisions of 2026-11-20 (Dolphin is out; one lower-guardrail, tool-capable model for a single soak agent, still to be chosen), the compose-forwarding gap, and the council-pricing fix.
+Follow-up: [BO-2.5](BO-2.5-report-v2.md) reorders and extends the daily report and fills the soak agent slot.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 Nothing here steers what an agent does. A model is plumbing; the constitution, the tripwires, the refusal rules and the spend caps do not look at which model an agent runs on.
 

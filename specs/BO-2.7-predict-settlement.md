@@ -1,6 +1,7 @@
 # BO-2.7 — `predict` + settlement (+ PR #7 carry-over)
 
 Spec for ORDER BO-2.7 (section 31 of `AUTOMATON_COLLAB_FOR_GROK.md`), plan row BO-2.7: a prediction is stored before the action; at the deadline the runtime writes the actual number from the facts table; the report shows the hit rate per agent. It borrows the self-calibration bookkeeping loop and installs nothing. Follows [BO-2.3](BO-2.3-refusal-records.md); the facts it settles on are written by [BO-2.1b](BO-2.1b-claim-facts.md) and [BO-2.2](BO-2.2-no-phantom-products.md).
+Follow-up: [BO-2.5](BO-2.5-report-v2.md) adds the self-inflatable note to the Predictions section of the daily report.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 The runtime only keeps score. The metrics are neutral counts and sums of runtime facts. Nothing here suggests what to sell or what to predict.
 
