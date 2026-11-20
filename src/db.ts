@@ -165,6 +165,42 @@ CREATE TABLE IF NOT EXISTS refusals (
 );
 
 CREATE INDEX IF NOT EXISTS refusals_agent_time ON refusals(agent_id, created_at);
+
+CREATE TABLE IF NOT EXISTS predictions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  op TEXT NOT NULL,
+  value INTEGER NOT NULL,
+  note TEXT,
+  created_at INTEGER NOT NULL,
+  deadline_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  actual INTEGER,
+  settled_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS predictions_status_deadline ON predictions(status, deadline_at);
+
+-- A prediction is immutable. The only change allowed is settlement: open to hit or miss, with the actual value and the time.
+CREATE TRIGGER IF NOT EXISTS predictions_no_delete BEFORE DELETE ON predictions
+BEGIN
+  SELECT RAISE(ABORT, 'a prediction is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS predictions_no_edit BEFORE UPDATE ON predictions
+WHEN OLD.status != 'open'
+  OR NEW.status NOT IN ('open', 'hit', 'miss')
+  OR NEW.agent_id IS NOT OLD.agent_id
+  OR NEW.metric IS NOT OLD.metric
+  OR NEW.op IS NOT OLD.op
+  OR NEW.value IS NOT OLD.value
+  OR NEW.note IS NOT OLD.note
+  OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.deadline_at IS NOT OLD.deadline_at
+BEGIN
+  SELECT RAISE(ABORT, 'a prediction is immutable');
+END;
 CREATE INDEX IF NOT EXISTS ledger_agent ON ledger_entries(agent_id);
 CREATE INDEX IF NOT EXISTS spend_day ON spend(day, agent_id);
 `;

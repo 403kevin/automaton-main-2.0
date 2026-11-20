@@ -78,6 +78,7 @@ export interface AppConfig {
   readFeedPriceUnits: number;
   readFeedHourlyLimit: number;
   claimHourlyLimit: number;
+  predictHourlyLimit: number;
   redditUserAgent: string;
   browseEnabled: boolean;
   browseStepPriceUnits: number;
@@ -321,6 +322,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     readFeedPriceUnits: usd(env.READ_FEED_PRICE_USD, "0.0005", "READ_FEED_PRICE_USD"),
     readFeedHourlyLimit: integer(env.READ_FEED_HOURLY_LIMIT, 60, "READ_FEED_HOURLY_LIMIT"),
     claimHourlyLimit: integer(env.CLAIM_HOURLY_LIMIT, 30, "CLAIM_HOURLY_LIMIT"),
+    predictHourlyLimit: integer(env.PREDICT_HOURLY_LIMIT, 10, "PREDICT_HOURLY_LIMIT"),
     redditUserAgent: headerValue(env.REDDIT_USER_AGENT, DEFAULT_REDDIT_USER_AGENT),
     browseEnabled: env.BROWSE_ENABLED === "true",
     browseStepPriceUnits: usd(env.BROWSE_STEP_PRICE_USD, "0.005", "BROWSE_STEP_PRICE_USD"),
@@ -362,6 +364,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       serve_endpoint: serveEndpointPriceUnits,
       remember: parseUsd("0.0001"),
       claim: usd(env.CLAIM_COST_USD, "0.0001", "CLAIM_COST_USD"),
+      predict: usd(env.PREDICT_COST_USD, "0.0001", "PREDICT_COST_USD"),
       balance: 0,
       council: 0,
       spawn_child: 0,
