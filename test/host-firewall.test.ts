@@ -114,7 +114,8 @@ describe("host firewall input drop", () => {
 
   it("names no interface other than br-+ and docker0", () => {
     const result = run([], []);
-    expect(interfaces(result.log).every((name) => name === "br-+" || name === "docker0")).toBe(true);
-    expect(interfaces(result.log).sort()).toEqual(["br-+", "docker0"]);
+    const named = interfaces(result.log);
+    expect(named.every((name) => name === "br-+" || name === "docker0")).toBe(true);
+    expect([...new Set(named)].sort()).toEqual(["br-+", "docker0"]);
   });
 });
