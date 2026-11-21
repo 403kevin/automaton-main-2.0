@@ -117,7 +117,8 @@ describe("soak profiles carry every setting", () => {
   it("gives the Sepolia profile every template key, including the 22 that were only in the template", () => {
     const template = loadEnvFile(TEMPLATE);
     const sepolia = loadEnvFile(SEPOLIA);
-    for (const key of SEPOLIA_GAP) expect(sepolia[key], key).toBe(template[key]);
+    const gaps = SEPOLIA_GAP.filter((key) => sepolia[key] !== template[key]);
+    expect(gaps, gaps.join(", ")).toEqual([]);
     expect(Object.keys(sepolia).sort()).toEqual(Object.keys(template).sort());
   });
 
