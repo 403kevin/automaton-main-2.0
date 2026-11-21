@@ -98,10 +98,10 @@ function namesReadByConfig(): Set<string> {
 
 describe("soak profiles carry every setting", () => {
   it("puts every .env.example key in the template, or excuses it", () => {
-    const template = loadEnvFile(TEMPLATE);
+    const template = declaredKeys(TEMPLATE);
     const missing: string[] = [];
     for (const key of declaredKeys(EXAMPLE)) {
-      if (template[key] !== undefined || NOT_IN_SOAK[key]) continue;
+      if (template.has(key) || NOT_IN_SOAK[key]) continue;
       missing.push(key);
     }
     expect(missing, missing.join(", ")).toEqual([]);
