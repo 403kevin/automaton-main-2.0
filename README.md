@@ -280,6 +280,8 @@ Safe defaults: copy `config/soak.env.template` to `.env.soak` and pass `-f docke
 
 Both soak profiles, `config/soak.env.template` and `config/soak.sepolia.env`, carry every setting the soak runs on, including claim, predict and offer limits. `test/soak-profile-keys.test.ts` fails if the two profiles disagree (except `MONEY_MODE`), if a key in `.env.example` is missing from the template without a reason in the test, or if `src/config.ts` reads a name that `.env.example` does not mention without a reason in the test.
 
+`test/image-contents.test.ts` checks that each image contains every relative import at the path that import resolves to, without building an image. For the Docker runtime, `REF_DIR` is the host path of `./ref`. On the soak VPS that path is `/root/automaton/ref`. The host Docker daemon bind-mounts it read-only at `/ref` in agent containers. An empty `REF_DIR` would make Docker create an empty directory on the host and mount that.
+
 The profile's default model is `mistralai/mistral-small-3.2-24b-instruct`. Dolphin was dropped on 20 November 2026 because it has no tool calling, and no uncensored or abliterated build on OpenRouter supports tools. Any slug is passed through, so `DEFAULT_MODEL` can be changed.
 
 On a small Linux VPS:

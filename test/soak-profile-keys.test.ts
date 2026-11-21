@@ -17,7 +17,6 @@ const NOT_IN_SOAK: Record<string, string> = {
   EXA_API_KEY: "unused with SearXNG",
   USDC_ADDRESS: "network default",
   HANDLER_IMAGE: "defaults to AGENT_IMAGE",
-  REF_DIR: "default path",
 };
 
 /** Read by config.ts and set by compose, or a fixed path. Not an owner soak setting. */

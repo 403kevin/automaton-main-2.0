@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { buildApp } from "./app.js";
 import { runDemoScenario } from "./demo.js";
 import { redact } from "./redact.js";
@@ -55,8 +56,16 @@ export async function main(argv: string[]): Promise<void> {
   throw new Error("Commands: serve, demo [--check], soak, seed, status, topup <agentId> <usd>, deposit <agentId> <usd>, kill, resume");
 }
 
-async function runSoak(startIfDown: boolean, file = "config/soak.sepolia.env"): Promise<void> {
-  const env: Record<string, string> = { ...loadEnvFile(file) };
+async function runSoak(startIfDown: boolean, file?: string): Promise<void> {
+  const chosen = file ?? "config/soak.sepolia.env";
+  let fromFile: Record<string, string> = {};
+  if (!fs.existsSync(chosen)) {
+    if (file !== undefined) fromFile = loadEnvFile(chosen);
+    else console.log("No config/soak.sepolia.env here; using the process environment.");
+  } else {
+    fromFile = loadEnvFile(chosen);
+  }
+  const env: Record<string, string> = { ...fromFile };
   for (const [key, value] of Object.entries(process.env)) {
     if (value) env[key] = value;
   }
