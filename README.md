@@ -270,7 +270,7 @@ sudo scripts/host-firewall.sh
 scripts/preflight.sh
 ```
 
-The firewall script needs root. Preflight prints PASS, FAIL, or SKIP for each check and exits non-zero if any check fails. A SKIP counts as a failure unless you pass `--allow-skip`.
+The firewall script needs root. It also drops new connections that arrive on Docker bridge interfaces (`br-+`, which is every compose network, and `docker0`). A container connecting to the host gateway is delivered to INPUT, so the metadata rule in `DOCKER-USER` does not cover it. SSH on the public interface is unchanged. `--check` reports present only when the metadata rule and both INPUT rules are installed. Preflight prints PASS, FAIL, or SKIP for each check and exits non-zero if any check fails. A SKIP counts as a failure unless you pass `--allow-skip`.
 
 ## Seven-day Base Sepolia soak
 
