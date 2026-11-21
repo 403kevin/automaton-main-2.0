@@ -1,6 +1,6 @@
 # BO-3.1a — soak profiles carry every setting
 
-Spec for ORDER BO-3.1a (section 42 of `AUTOMATON_COLLAB_FOR_GROK.md`). It follows [BO-2.4b](BO-2.4b-agent-model-compose.md).
+Spec for ORDER BO-3.1a (section 42 of `AUTOMATON_COLLAB_FOR_GROK.md`). It follows [BO-2.4b](BO-2.4b-agent-model-compose.md). Follow-up: [BO-3.1b](BO-3.1b-image-contents.md) makes the images contain every file they import, and sets `REF_DIR` to the host path.
 Format: `to-spec` (mattpocock/skills). It lives in `repo/specs/` for the same reason as the earlier specs: `spec-artifact` points at Omega's `20-CONTROL/specs/`, which is outside this git repo and could not be cited from the PR.
 Nothing here changes spend caps, guards, tools, or what an agent may do. It writes down settings the soak was already using as code defaults, and it makes the two soak profiles list the same keys.
 
