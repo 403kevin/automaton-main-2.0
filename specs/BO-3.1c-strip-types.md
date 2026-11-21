@@ -64,3 +64,4 @@ Starting the senses server and the orchestrator under plain Node is the order's 
 - The section 49 log showed Node v26.13.1 on `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` at `file:///app/src/crawl.ts:460`.
 - Node 22 since 22.18 and Node 26 use the same strip-only rules. The version gap is not the cause. The order still starts senses under both.
 - `RUNTIME=process` is the non-Docker value `src\config.ts` accepts. `auto` and `docker` are the other two. `local` is not valid.
+- The container-to-host drop is specified in [BO-3.1d](BO-3.1d-host-input-drop.md).
