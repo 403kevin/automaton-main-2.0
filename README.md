@@ -282,6 +282,8 @@ Both soak profiles, `config/soak.env.template` and `config/soak.sepolia.env`, ca
 
 `test/image-contents.test.ts` checks that each image contains every relative import at the path that import resolves to, without building an image. For the Docker runtime, `REF_DIR` is the host path of `./ref`. On the soak VPS that path is `/root/automaton/ref`. The host Docker daemon bind-mounts it read-only at `/ref` in agent containers. An empty `REF_DIR` would make Docker create an empty directory on the host and mount that.
 
+Senses runs its TypeScript under Node's built-in type stripping. Only erasable TypeScript is allowed in `senses\` and in `src\constitution.ts`, which the senses server imports. `test/strip-types.test.ts` runs Node's stripper over those files and fails if one of them is not erasable.
+
 The profile's default model is `mistralai/mistral-small-3.2-24b-instruct`. Dolphin was dropped on 20 November 2026 because it has no tool calling, and no uncensored or abliterated build on OpenRouter supports tools. Any slug is passed through, so `DEFAULT_MODEL` can be changed.
 
 On a small Linux VPS:

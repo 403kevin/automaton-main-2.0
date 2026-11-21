@@ -31,4 +31,5 @@ COPY constitution.md /constitution.md
 USER pwuser
 EXPOSE 7070
 
+# Runs src/server.ts with Node's built-in type stripping (strip-only). The base image ships Node 26.13.1 (seen 2026-11-21). Only erasable TypeScript is allowed; test/strip-types.test.ts enforces it.
 CMD ["node", "src/server.ts"]
