@@ -456,8 +456,11 @@ function emptyDoc(error: string): LoadedDocument {
 
 class Pacer {
   private readonly last = new Map<string, number>();
+  private delayMs: number;
 
-  constructor(private delayMs: number) {}
+  constructor(delayMs: number) {
+    this.delayMs = delayMs;
+  }
 
   setDelay(ms: number): void {
     this.delayMs = ms;
