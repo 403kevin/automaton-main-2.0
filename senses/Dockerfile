@@ -22,6 +22,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* /root/.cache /tmp/requirements.browse.txt
 
 COPY senses/src ./src
+COPY senses/feeds ./feeds
 COPY senses/browse.py ./browse.py
 # Host deny checks reuse the orchestrator's constitution module when this file is present.
 COPY src/constitution.ts /src/constitution.ts
