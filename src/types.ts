@@ -87,7 +87,9 @@ export interface ServedEndpoint {
   sampleQuery: Record<string, string>;
 }
 
-export type Result<T> = { ok: true; value: T } | { ok: false; error: string; rule?: string };
+export type Result<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: string; rule?: string; retryAfterMs?: number };
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";

@@ -19,8 +19,7 @@ fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) 
 process.stdout.write("container-id\\n");
 `,
     );
-    fs.chmodSync(docker, 0o755);
-    const probe = spawnSync(docker, ["version"], { encoding: "utf8" });
+    const probe = spawnSync(process.execPath, [docker, "version"], { encoding: "utf8" });
     expect(probe.status).toBe(0);
 
     const config = loadConfig({
@@ -29,7 +28,7 @@ process.stdout.write("container-id\\n");
       ADMIN_TOKEN: "test-admin",
       RUNTIME: "docker",
     });
-    const runtime = new DockerRuntime(config, [docker]);
+    const runtime = new DockerRuntime(config, [process.execPath, docker]);
     await runtime.start({ id: "agent_1", token: "agent-token", workspace: path.join(dir, "ws") });
 
     const calls = fs

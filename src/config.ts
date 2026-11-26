@@ -33,7 +33,11 @@ export interface AppConfig {
   normalMinUnits: number;
   lowMinUnits: number;
   agentDailyCapUnits: number;
+  /** Per-agent hourly discretionary spend ceiling. 0 disables (default). */
+  agentHourlyCapUnits: number;
   globalDailyCapUnits: number;
+  /** Max completion tokens sent to the model. Default 1500, minimum 256. */
+  maxOutputTokens: number;
   maxPopulation: number;
   maxDepth: number;
   maxChildren: number;
@@ -346,7 +350,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     normalMinUnits: normalMin,
     lowMinUnits: lowMin,
     agentDailyCapUnits: usd(env.AGENT_DAILY_CAP_USD, "5.00", "AGENT_DAILY_CAP_USD"),
+    agentHourlyCapUnits: usd(env.AGENT_HOURLY_CAP_USD, "0", "AGENT_HOURLY_CAP_USD"),
     globalDailyCapUnits: usd(env.GLOBAL_DAILY_CAP_USD, "25.00", "GLOBAL_DAILY_CAP_USD"),
+    maxOutputTokens: atLeast(env.MAX_OUTPUT_TOKENS, 1500, 256, "MAX_OUTPUT_TOKENS"),
     maxPopulation: integer(env.MAX_POPULATION, 12, "MAX_POPULATION"),
     maxDepth: integer(env.MAX_DEPTH, 3, "MAX_DEPTH"),
     maxChildren: integer(env.MAX_CHILDREN, 3, "MAX_CHILDREN"),

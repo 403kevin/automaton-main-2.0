@@ -21,7 +21,13 @@ import { harness } from "./helpers.js";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
-  while (cleanups.length) cleanups.pop()?.();
+  while (cleanups.length) {
+    try {
+      cleanups.pop()?.();
+    } catch {
+      // Windows can hold the sqlite file briefly after the harness closes.
+    }
+  }
 });
 
 describe("BO-4.1 hourly pacing", () => {

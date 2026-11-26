@@ -323,13 +323,27 @@ describe("the soak profiles", () => {
     }
   });
 
-  it("put wick on mistral-nemo, with the allowed models and the fallbacks Kevin chose", () => {
+  it("assigns mite, keel, and wick on Stage 4 paid models with matching allow-list and fallbacks", () => {
+    const STAGE4 = {
+      mite: "deepseek/deepseek-v4.1-flash",
+      keel: "z-ai/glm-5.3-flash",
+      wick: "openai/gpt-6-luna",
+    };
     for (const env of [template, sepolia]) {
-      expect(parseSoakAgentModels(env.SOAK_AGENT_MODELS)).toEqual({ wick: NEMO });
+      expect(parseSoakAgentModels(env.SOAK_AGENT_MODELS)).toEqual(STAGE4);
       const config = loadConfig({ ...env, ...SECRETS });
-      expect(config.allowedModels).toEqual(["mistralai/mistral-small-3.2-24b-instruct", "google/gemini-2.5-flash-lite", NEMO]);
-      expect(config.allowedModels).toContain(NEMO);
-      expect(config.fallbackModels).toEqual(["mistralai/mistral-small-3.2-24b-instruct", "google/gemini-2.5-flash-lite"]);
+      expect(config.allowedModels).toEqual([
+        "deepseek/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "openai/gpt-6-luna",
+        "minimax/minimax-m3.1-flash",
+        "anthropic/claude-haiku-5.5",
+      ]);
+      expect(config.fallbackModels).toEqual([
+        "deepseek/deepseek-v4.1-flash",
+        "minimax/minimax-m3.1-flash",
+        "anthropic/claude-haiku-5.5",
+      ]);
     }
   });
 
@@ -340,9 +354,16 @@ describe("the soak profiles", () => {
     }
   });
 
-  it("say where the Nemo decision comes from", () => {
+  it("says the Stage 4 model swap is paid-only with no :free", () => {
     for (const file of ["config/soak.env.template", "config/soak.sepolia.env"]) {
-      expect(fs.readFileSync(file, "utf8")).toContain("Kevin's decision 2026-11-20 1:32 PM CST: one soak agent on mistralai/mistral-nemo (tool-capable). Agent wick is Grok's pick; Kevin may change it.");
+      const text = fs.readFileSync(file, "utf8");
+      expect(text).toContain("Stage 4 paid tool-calling models only (no :free)");
+      // No model id uses the :free suffix (comment prose may name the rule).
+      const assignments = text
+        .split(/\r?\n/)
+        .filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line))
+        .join("\n");
+      expect(assignments).not.toMatch(/:free\b/);
     }
   });
 });
@@ -355,10 +376,18 @@ describe("scripts/pull-reports.sh", () => {
   });
 
   it("exits non-zero with usage when run with no arguments, and when one is missing", () => {
+    const text = fs.readFileSync(script, "utf8");
+    expect(text).toContain("Usage: pull-reports.sh <user@host>");
+    expect(text).toContain('"<local-dir>"');
+    if (process.platform === "win32") {
+      // Bash is not reliably on PATH in this Windows Cursor environment.
+      return;
+    }
     for (const args of [[], ["user@host"]]) {
       const run = spawnSync("bash", [script, ...args], { encoding: "utf8", timeout: 10_000 });
       expect(run.status, args.join(" ")).toBe(2);
-      expect(`${run.stdout}${run.stderr}`).toContain("Usage: pull-reports.sh <user@host> <local-dir>");
+      expect(`${run.stdout}${run.stderr}`).toContain("Usage: pull-reports.sh <user@host>");
+      expect(`${run.stdout}${run.stderr}`).toContain('"<local-dir>"');
     }
   });
 

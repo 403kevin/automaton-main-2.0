@@ -76,7 +76,14 @@ export function harness(
     runtime,
     swarm,
     cleanup() {
-      fs.rmSync(dir, { recursive: true, force: true });
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch (error) {
+        // Windows often keeps the sqlite handle briefly; the temp dir is disposable.
+        if ((error as NodeJS.ErrnoException).code !== "EPERM" && (error as NodeJS.ErrnoException).code !== "EBUSY") {
+          throw error;
+        }
+      }
     },
   };
 }

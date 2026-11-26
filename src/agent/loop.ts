@@ -13,7 +13,7 @@ export interface AgentHost {
     messages: ChatMessage[],
     tools: unknown[],
   ): Promise<
-    | { skipped: true; reason: string }
+    | { skipped: true; reason: string; retryAfterMs?: number }
     | { skipped: false; content: string; toolCalls: ToolCall[]; model: string; costUnits: number }
   >;
   authorizeTool(
@@ -34,13 +34,15 @@ export async function runAgentLoop(input: {
   sleepMs: number;
 }): Promise<void> {
   while (!input.signal.aborted) {
+    let waitMs = input.sleepMs;
     try {
-      await oneTurn(input);
+      const outcome = await oneTurn(input);
+      if (outcome.retryAfterMs !== undefined) waitMs = outcome.retryAfterMs;
     } catch (error) {
       const message = error instanceof Error ? error.message : "turn failed";
       await input.host.recordTurn(input.agentId, `Turn error: ${message}`).catch(() => undefined);
     }
-    await sleep(input.sleepMs, input.signal);
+    await sleep(waitMs, input.signal);
   }
 }
 
@@ -49,11 +51,11 @@ async function oneTurn(input: {
   host: AgentHost;
   workspace: string;
   denyHosts: string[];
-}): Promise<void> {
+}): Promise<{ retryAfterMs?: number }> {
   const snapshot = await input.host.snapshot(input.agentId);
   if (snapshot.killSwitch || snapshot.status !== "running") {
     await input.host.recordTurn(input.agentId, snapshot.killSwitch ? "Kill switch is on. Idle." : `Idle while ${snapshot.status}.`);
-    return;
+    return {};
   }
   const tools = toolsForModel();
   const messages: ChatMessage[] = [
@@ -63,11 +65,11 @@ async function oneTurn(input: {
   const first = await input.host.infer(input.agentId, messages, tools);
   if (first.skipped) {
     await input.host.recordTurn(input.agentId, `Inference skipped: ${first.reason}`);
-    return;
+    return { retryAfterMs: first.retryAfterMs };
   }
   if (first.toolCalls.length === 0) {
     await input.host.recordTurn(input.agentId, first.content || "(empty thought)");
-    return;
+    return {};
   }
   const notes: string[] = [];
   for (const call of first.toolCalls) {
@@ -89,6 +91,7 @@ async function oneTurn(input: {
   }
   const summary = fitNotes(notes, TURN_SUMMARY_CHARS);
   await input.host.recordTurn(input.agentId, summary || first.content || "Acted.");
+  return {};
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

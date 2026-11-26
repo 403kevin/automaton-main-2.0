@@ -415,8 +415,10 @@ describe("the report and the migration", () => {
 });
 
 describe("the soak template and the source", () => {
-  const MISTRAL = "mistralai/mistral-small-3.2-24b-instruct";
-  const GEMINI = "google/gemini-2.5-flash-lite";
+  // Stage 4 paid fallbacks (BO-4.1). No :free models.
+  const PRIMARY = "deepseek/deepseek-v4.1-flash";
+  const FB1 = "minimax/minimax-m3.1-flash";
+  const FB2 = "anthropic/claude-haiku-5.5";
 
   function templateValues(): Record<string, string> {
     const file = fileURLToPath(new URL("../config/soak.env.template", import.meta.url));
@@ -428,9 +430,9 @@ describe("the soak template and the source", () => {
     return values;
   }
 
-  it("sets FALLBACK_MODELS to Kevin's two models in his order, and the config parses them in that order", () => {
+  it("sets FALLBACK_MODELS to the Stage 4 paid models in order, and the config parses them in that order", () => {
     const values = templateValues();
-    expect(values.FALLBACK_MODELS).toBe(`${MISTRAL},${GEMINI}`);
+    expect(values.FALLBACK_MODELS).toBe(`${PRIMARY},${FB1},${FB2}`);
     const config = loadConfig({
       DATA_DIR: os.tmpdir(),
       MONEY_MODE: "dry-run",
@@ -442,9 +444,10 @@ describe("the soak template and the source", () => {
       FALLBACK_MODELS: values.FALLBACK_MODELS ?? "",
       MODEL_PRICES: values.MODEL_PRICES ?? "",
     });
-    expect(config.fallbackModels).toEqual([MISTRAL, GEMINI]);
-    expect(config.modelPrices[MISTRAL]).toEqual({ promptPerM: 0.075, completionPerM: 0.2 });
-    expect(config.modelPrices[GEMINI]).toEqual({ promptPerM: 0.1, completionPerM: 0.4 });
+    expect(config.fallbackModels).toEqual([PRIMARY, FB1, FB2]);
+    expect(config.modelPrices[PRIMARY]).toEqual({ promptPerM: 0.0507, completionPerM: 0.2028 });
+    expect(config.modelPrices[FB1]).toEqual({ promptPerM: 0.075, completionPerM: 0.3 });
+    expect(config.modelPrices[FB2]).toEqual({ promptPerM: 0.1, completionPerM: 0.5 });
   });
 
   it("is passed to the orchestrator by docker-compose, because compose forwards only the variables it names", () => {
@@ -453,7 +456,7 @@ describe("the soak template and the source", () => {
     expect(compose).toMatch(/^\s+MODEL_PRICES: \$\{MODEL_PRICES:-\}\s*$/m);
   });
 
-  it("has no fallback model ID written in src", () => {
+  it("has no soak model ID hard-coded in src", () => {
     const root = fileURLToPath(new URL("../src", import.meta.url));
     const walk = (dir: string): string[] =>
       fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -464,6 +467,7 @@ describe("the soak template and the source", () => {
       const text = fs.readFileSync(file, "utf8");
       expect(text, file).not.toContain("mistral-small-3.2");
       expect(text, file).not.toContain("gemini-2.5-flash-lite");
+      expect(text, file).not.toContain("deepseek-v4.1-flash");
     }
   });
 });

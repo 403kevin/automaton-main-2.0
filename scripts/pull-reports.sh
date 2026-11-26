@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # Copy the daily reports from the soak server to this machine (Git Bash or WSL).
 #
-#   scripts/pull-reports.sh <user@host> <local-dir>
+#   scripts/pull-reports.sh root@host "<local-dir>"
+#   scripts/pull-reports.sh root@host "/path/with spaces"
 #
 # The reports are written to DATA_DIR/reports inside the orchestrator container (/app/data/reports), and /app/data is the
 # named Docker volume automaton-data, not a folder on the server. So this runs `docker compose cp` on the server over SSH,
-# sends the tar stream to standard output and unpacks it here under <local-dir>/reports/. Nothing is written on the server
+# sends the tar stream to standard output and unpacks it here under "<local-dir>"/reports/. Nothing is written on the server
 # and nothing is deleted. It uses the SSH key and known_hosts you already have; host key checking is never turned off.
 #
 # The project folder on the server is $AUTOMATON_REMOTE_DIR (default: automaton, relative to the SSH home folder).
 set -euo pipefail
 
 usage() {
-  echo "Usage: pull-reports.sh <user@host> <local-dir>" >&2
-  echo "  Copies the server's data/reports into <local-dir>/reports. Set AUTOMATON_REMOTE_DIR if the project is not in ~/automaton." >&2
+  echo "Usage: pull-reports.sh <user@host> \"<local-dir>\"" >&2
+  echo "  Example: scripts/pull-reports.sh root@host \"/path/with spaces\"" >&2
+  echo "  Copies the server's data/reports into \"<local-dir>\"/reports. Set AUTOMATON_REMOTE_DIR if the project is not in ~/automaton." >&2
 }
 
 if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then

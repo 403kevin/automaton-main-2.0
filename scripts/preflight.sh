@@ -14,6 +14,7 @@
 # 4. WALLET_MASTER_KEY, ADMIN_TOKEN, and TREASURY_ADDRESS are non-empty in .env.soak.
 # 5. POST /admin/kill-switch {"enabled":true} — the same call as
 #    `node dist/index.js kill` — stops a running test agent container within 30s.
+#    Skipped when --read-only is set (safe for last-day checks on a live stack).
 # 6. GET /api/overview — the same call as `node dist/index.js status` — reports
 #    agentCap, globalCap, maxPopulation, and maxDepth matching .env.soak.
 
@@ -27,6 +28,7 @@ PREFLIGHT_TOKEN=""
 AGENT_IMAGE_NAME=""
 ADMIN_TOKEN_FROM_ENV="${ADMIN_TOKEN:-}"
 ALLOW_SKIP=0
+READ_ONLY=0
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
@@ -105,10 +107,11 @@ JS
 
 usage() {
   cat <<'EOF'
-Usage: scripts/preflight.sh [--allow-skip]
+Usage: scripts/preflight.sh [--allow-skip] [--read-only]
 
 Prints PASS, FAIL, or SKIP for six checks. Exits 0 when every check passes.
 A SKIP is a failure unless --allow-skip is set. Secret values are never printed.
+--read-only runs checks 1–4 and 6 only (no kill-switch toggle, no probe container).
 EOF
 }
 
@@ -367,6 +370,14 @@ remove_probe() {
   [[ "$PROBE_ID" =~ ^a[0-9a-f]{16}$ ]] || return 0
   REMOVE_PROBE=0
   "${DOCKER[@]}" rm -f "automaton-${PROBE_ID}" >/dev/null 2>&1 || true
+  # Archive via the orchestrator so preflight-probe does not sit unarchived on the ledger.
+  if [[ -n "$PREFLIGHT_TOKEN" ]] && health; then
+    if http POST /admin/archive "{\"agentId\":\"${PROBE_ID}\",\"reason\":\"preflight cleanup\"}" 30; then
+      printf 'NOTE: archived preflight-probe %s via /admin/archive\n' "$PROBE_ID"
+      return 0
+    fi
+  fi
+  printf 'NOTE: cleanup note — preflight-probe %s container removed; archive manually if still on the ledger (POST /admin/archive)\n' "$PROBE_ID"
 }
 
 restore_kill() {
@@ -829,6 +840,7 @@ main() {
   while [[ "$#" -gt 0 ]]; do
     case "$1" in
       --allow-skip) ALLOW_SKIP=1 ;;
+      --read-only) READ_ONLY=1 ;;
       -h|--help)
         usage
         exit 0
@@ -877,7 +889,10 @@ main() {
   check_network
   check_bind
   check_secrets
-  check_kill
+  # --read-only: checks 1–4 and 6 only (no kill-switch / probe).
+  if [[ "$READ_ONLY" != "1" ]]; then
+    check_kill
+  fi
   check_caps
   finish
 }

@@ -37,7 +37,7 @@ import type { SearchProvider } from "./search.js";
 import { classifyAgentPath, FEED_SOURCE_NAMES } from "./agent/tools.js";
 import { HttpSensesClient, SensesRequestError, type CrawlSiteResult, type FeedResult, type SensesClient } from "./senses-client.js";
 import type { BrowseLlmPort } from "./llm-proxy.js";
-import { checkSpend } from "./spend.js";
+import { checkSpend, msUntilNextUtcHour, msUntilNextUtcMidnight, utcHourStart } from "./spend.js";
 import { checkClaim, claimAttempts, insertClaim, insertFact, ownRecords } from "./claims.js";
 import { modelReliabilityLines } from "./model-report.js";
 import {
@@ -478,8 +478,17 @@ export class Swarm {
       globalCap: this.config.globalDailyCapUnits,
       killSwitch: this.killed,
       allowNegative: false,
+      agentHourlySpent: this.spentThisHour(agentId),
+      agentHourlyCap: this.config.agentHourlyCapUnits,
     });
-    if (!decision.ok) return { ok: false, error: decision.reason ?? "Spend refused.", rule: decision.rule };
+    if (!decision.ok) {
+      return {
+        ok: false,
+        error: decision.reason ?? "Spend refused.",
+        rule: decision.rule,
+        retryAfterMs: this.retryAfterMsFor(decision.retryScope),
+      };
+    }
     return { ok: true, value: { balance: agent.balanceUnits } };
   }
 
@@ -595,6 +604,16 @@ export class Swarm {
   /** Every model failed for this wake. Nothing was debited. It is an event, not a refusal: no tool call was refused. */
   recordLostWake(agentId: string, model: string, reason: string): void {
     this.event(agentId, "lost_wake", `model=${model} reason=${reason.replace(/\s+/g, " ").slice(0, 200)}`);
+  }
+
+  /** The model hit max_tokens (finish_reason=length). Truncated JSON actions must not run. */
+  recordInferenceTruncated(agentId: string, model: string): void {
+    this.event(agentId, "inference_truncated", `model=${sanitizeSenseText(model).slice(0, 100)} finish_reason=length`);
+  }
+
+  /** Owner/admin archive (preflight cleanup). No-op when already archived or unknown. */
+  async archiveAgent(agentId: string, reason: string): Promise<void> {
+    await this.archive(agentId, reason);
   }
 
   recordTurn(agentId: string, text: string): void {
@@ -2500,10 +2519,17 @@ export class Swarm {
           globalCap: this.config.globalDailyCapUnits,
           killSwitch: this.killed,
           allowNegative: false,
+          agentHourlySpent: this.spentThisHour(input.agentId),
+          agentHourlyCap: this.config.agentHourlyCapUnits,
         });
         if (!decision.ok) {
           rollback();
-          return { ok: false, error: decision.reason ?? "Spend refused.", rule: decision.rule };
+          return {
+            ok: false,
+            error: decision.reason ?? "Spend refused.",
+            rule: decision.rule,
+            retryAfterMs: this.retryAfterMsFor(decision.retryScope),
+          };
         }
       }
       const next = agent.balanceUnits + input.amount;
@@ -2625,6 +2651,20 @@ export class Swarm {
         })
       : (this.db.prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM spend WHERE day = ?").get(day) as { n: number });
     return row.n;
+  }
+
+  private spentThisHour(agentId: string): number {
+    const since = utcHourStart(this.clock.now());
+    const row = this.db
+      .prepare("SELECT COALESCE(SUM(amount_units), 0) AS n FROM spend WHERE agent_id = ? AND created_at >= ?")
+      .get(agentId, since) as { n: number };
+    return row.n;
+  }
+
+  private retryAfterMsFor(scope: "hourly" | "daily" | undefined): number | undefined {
+    if (!scope) return undefined;
+    const now = this.clock.now();
+    return scope === "hourly" ? msUntilNextUtcHour(now) : msUntilNextUtcMidnight(now);
   }
 
   private population(): number {

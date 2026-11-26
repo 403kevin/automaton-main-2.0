@@ -16,6 +16,8 @@ export interface LlmCompletion {
   toolCalls: { id: string; name: string; arguments: string }[];
   usage: LlmUsage;
   model: string;
+  /** OpenRouter / provider finish_reason (e.g. stop, length). */
+  finishReason?: string;
 }
 
 export interface LlmClient {
@@ -107,7 +109,13 @@ export class OpenRouterLlm implements LlmClient {
 
   async mayRetry(input: { model: string; tools?: unknown[] }): Promise<boolean> {
     const supported = await this.catalog.supportedParameters(input.model);
-    const planned = buildCompletionBody({ model: input.model, messages: [], tools: input.tools, supported });
+    const planned = buildCompletionBody({
+      model: input.model,
+      messages: [],
+      tools: input.tools,
+      supported,
+      maxTokens: this.config.maxOutputTokens,
+    });
     return planned.protocol !== "tools";
   }
 
@@ -119,13 +127,23 @@ export class OpenRouterLlm implements LlmClient {
   async complete(input: { model: string; messages: ChatMessage[]; tools?: unknown[] }): Promise<LlmCompletion> {
     const models = this.modelsFor(input.model);
     const supported = await this.catalog.supportedParameters(input.model);
-    const planned = buildCompletionBody({ model: input.model, messages: input.messages, tools: input.tools, supported });
-    const maxTokens = completionLimit(planned.body);
+    const planned = buildCompletionBody({
+      model: input.model,
+      messages: input.messages,
+      tools: input.tools,
+      supported,
+      maxTokens: this.config.maxOutputTokens,
+    });
+    const maxTokens = completionLimit(planned.body, this.config.maxOutputTokens);
     // Any model in the list may answer, so the prompt must fit the smallest window among them.
     const contextLength = Math.min(...(await Promise.all(models.map((model) => this.contexts.contextLength(model)))));
     const fitted = trimMessagesToFit(asMessages(planned.body.messages), contextLength, maxTokens);
     const first = await this.post(withModels({ ...planned.body, messages: fitted }, models), input.model);
     if (planned.protocol === "tools") return first;
+    // Truncated JSON must not become half-executed actions.
+    if (first.finishReason === "length") {
+      return { ...first, toolCalls: [] };
+    }
     const parsed = extractActions(first.content);
     if (parsed.ok) {
       return { ...first, content: parsed.say || first.content, toolCalls: jsonToolCalls(parsed.actions) };
@@ -140,6 +158,9 @@ export class OpenRouterLlm implements LlmClient {
       second = await this.post(withModels({ ...planned.body, messages: retryMessages }, models), input.model);
     } catch {
       return { ...first, toolCalls: [] };
+    }
+    if (second.finishReason === "length") {
+      return { ...second, toolCalls: [], usage: addUsage(first.usage, second.usage) };
     }
     const again = extractActions(second.content);
     return {
@@ -170,11 +191,16 @@ export class OpenRouterLlm implements LlmClient {
     if (!response.ok) throw new Error(`OpenRouter HTTP ${response.status}: ${text.slice(0, 300)}`);
     const parsed = JSON.parse(text) as {
       model?: string;
-      choices?: { message?: { content?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] } }[];
+      choices?: {
+        finish_reason?: string;
+        message?: { content?: string; tool_calls?: { id: string; function: { name: string; arguments: string } }[] };
+      }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number; cost?: number };
     };
-    const message = parsed.choices?.[0]?.message;
+    const choice = parsed.choices?.[0];
+    const message = choice?.message;
     const cost = parsed.usage?.cost;
+    const finishReason = typeof choice?.finish_reason === "string" ? choice.finish_reason : undefined;
     return {
       // The model that actually answered: with fallbacks it may not be the one asked for (OpenRouter names it in the response).
       model: typeof parsed.model === "string" && parsed.model ? parsed.model : requestedModel,
@@ -189,6 +215,7 @@ export class OpenRouterLlm implements LlmClient {
         completionTokens: parsed.usage?.completion_tokens ?? 0,
         costUsd: typeof cost === "number" ? cost.toFixed(6) : undefined,
       },
+      finishReason,
     };
   }
 }
@@ -205,9 +232,9 @@ function asMessages(value: unknown): ChatMessage[] {
   return Array.isArray(value) ? (value as ChatMessage[]) : [];
 }
 
-function completionLimit(body: Record<string, unknown>): number {
+function completionLimit(body: Record<string, unknown>, fallback = 1500): number {
   const value = body.max_tokens;
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 700;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
 function jsonToolCalls(actions: { name: string; arguments: Record<string, unknown> }[]): LlmCompletion["toolCalls"] {

@@ -14,6 +14,7 @@ export const RULE_IDS = [
   "constitution.III",
   "owner.denylist",
   "spend.cap",
+  "spend.cap.hourly",
   "ledger.balance",
   "ledger.duplicate",
   "limit.hourly.see_page",

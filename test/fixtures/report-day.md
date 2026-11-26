@@ -150,6 +150,8 @@ Last 24 hours.
 - mistralai/mistral-nemo: 3
 - org/heretic-normal: 3
 
+Truncated (length): 0
+
 ### Assigned and served
 - mite: assigned org/heretic-normal -> served org/heretic-normal 3
 - wick: assigned mistralai/mistral-nemo -> served mistralai/mistral-nemo 3
