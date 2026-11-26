@@ -3,8 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { runAgentLoop, type AgentHost } from "../src/agent/loop.js";
 import { buildCompletionBody } from "../src/actions.js";
 import { loadConfig } from "../src/config.js";
+import type { HandlerSandbox } from "../src/handlers.js";
+import { DirectHost } from "../src/host.js";
 import { InferenceGateway } from "../src/inference.js";
 import { OpenRouterLlm, type LlmClient, type LlmCompletion, type ModelCatalog } from "../src/llm.js";
 import type { ModelContextCache } from "../src/model-context.js";
@@ -12,6 +15,7 @@ import { modelReliabilityLines } from "../src/model-report.js";
 import { parseUsd } from "../src/money.js";
 import { DockerRuntime } from "../src/runtime.js";
 import { parseSoakAgentModels } from "../src/seed.js";
+import { startServer } from "../src/server.js";
 import { loadEnvFile } from "../src/soak.js";
 import { checkSpend } from "../src/spend.js";
 import type { ChatMessage } from "../src/types.js";
@@ -286,5 +290,127 @@ describe("BO-4.1 ops scripts", () => {
     expect(text).toMatch(/--read-only/);
     expect(text).toMatch(/check_kill|5-kill-switch/);
     expect(text).toMatch(/archive|cleanup note|preflight-probe/i);
+  });
+});
+
+describe("BO-4.1 runAgentLoop honors retryAfterMs", () => {
+  it("sleeps retryAfterMs, not sleepMs, after a spend-cap skip", async () => {
+    const rig = harness();
+    cleanups.push(rig.cleanup);
+    const agent = await rig.swarm.createAgent({ name: "looper" });
+    if (!agent.ok) throw new Error(agent.error);
+    const controller = new AbortController();
+    const inferAt: number[] = [];
+    const host: AgentHost = {
+      snapshot: async (agentId) => rig.swarm.snapshot(agentId),
+      infer: async () => {
+        inferAt.push(Date.now());
+        if (inferAt.length >= 2) controller.abort();
+        return { skipped: true, reason: "Hourly cap reached.", retryAfterMs: 300 };
+      },
+      authorizeTool: async () => ({ ok: true, handled: false }),
+      recordTurn: async () => undefined,
+      recordRefusal: async () => undefined,
+    };
+    // sleepMs is 60s. If the loop ignored retryAfterMs the second infer would not happen inside the test timeout.
+    await runAgentLoop({ agentId: agent.value.id, host, signal: controller.signal, workspace: agent.value.workspace ?? ".", denyHosts: [], sleepMs: 60_000 });
+    expect(inferAt).toHaveLength(2);
+    const gap = inferAt[1]! - inferAt[0]!;
+    expect(gap).toBeGreaterThanOrEqual(250);
+    expect(gap).toBeLessThan(5_000);
+  }, 10_000);
+
+  it("abort cuts a long cap sleep short instead of waiting out retryAfterMs", async () => {
+    const rig = harness();
+    cleanups.push(rig.cleanup);
+    const agent = await rig.swarm.createAgent({ name: "looper2" });
+    if (!agent.ok) throw new Error(agent.error);
+    const controller = new AbortController();
+    let calls = 0;
+    const host: AgentHost = {
+      snapshot: async (agentId) => rig.swarm.snapshot(agentId),
+      infer: async () => {
+        calls += 1;
+        setTimeout(() => controller.abort(), 100);
+        return { skipped: true, reason: "Hourly cap reached.", retryAfterMs: 3_600_000 };
+      },
+      authorizeTool: async () => ({ ok: true, handled: false }),
+      recordTurn: async () => undefined,
+      recordRefusal: async () => undefined,
+    };
+    const started = Date.now();
+    await runAgentLoop({ agentId: agent.value.id, host, signal: controller.signal, workspace: ".", denyHosts: [], sleepMs: 10 });
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  }, 10_000);
+});
+
+describe("BO-4.1 POST /admin/archive", () => {
+  async function serve() {
+    const rig = harness();
+    cleanups.push(rig.cleanup);
+    const server = await startServer({
+      config: { ...rig.config, port: 0, host: "127.0.0.1" },
+      swarm: rig.swarm,
+      host: new DirectHost(rig.swarm, {} as InferenceGateway),
+      handlers: { shutdown: async () => undefined } as unknown as HandlerSandbox,
+      background: false,
+    });
+    cleanups.push(() => server.close());
+    return { rig, server };
+  }
+
+  function post(url: string, body: unknown, token?: string) {
+    return fetch(`${url}/admin/archive`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token === undefined ? {} : { "x-admin-token": token }) },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("rejects a missing or wrong X-Admin-Token with 401 and archives nothing", async () => {
+    const { rig, server } = await serve();
+    const agent = await rig.swarm.createAgent({ name: "guarded" });
+    if (!agent.ok) throw new Error(agent.error);
+    const none = await post(server.url, { agentId: agent.value.id });
+    expect(none.status).toBe(401);
+    const wrong = await post(server.url, { agentId: agent.value.id }, "not-the-token");
+    expect(wrong.status).toBe(401);
+    const row = rig.db.prepare("SELECT status FROM agents WHERE id = ?").get(agent.value.id) as { status: string };
+    expect(row.status).not.toBe("archived");
+  });
+
+  it("rejects a bad agentId with 400", async () => {
+    const { server } = await serve();
+    for (const agentId of ["", "nope", "../etc/passwd", "a123", `a${"g".repeat(16)}`]) {
+      const res = await post(server.url, { agentId }, "test-admin");
+      expect(res.status).toBe(400);
+    }
+    const missing = await post(server.url, {}, "test-admin");
+    expect(missing.status).toBe(400);
+  });
+
+  it("returns 200, marks the agent archived, and deletes no rows", async () => {
+    const { rig, server } = await serve();
+    const agent = await rig.swarm.createAgent({ name: "retire" });
+    if (!agent.ok) throw new Error(agent.error);
+    const id = agent.value.id;
+    rig.swarm.ownerTopup(id, parseUsd("1.00"), "seed");
+    expect(rig.swarm.debit(id, parseUsd("0.01"), "inference", "spent", "model").ok).toBe(true);
+    const count = (table: string) => (rig.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE agent_id = ?`).get(id) as { n: number }).n;
+    const ledgerBefore = count("ledger_entries");
+    const eventsBefore = count("events");
+    expect(ledgerBefore).toBeGreaterThan(0);
+
+    const res = await post(server.url, { agentId: id, reason: "test archive" }, "test-admin");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, agentId: id });
+
+    const row = rig.db.prepare("SELECT status, archived_at FROM agents WHERE id = ?").get(id) as { status: string; archived_at: number | null };
+    expect(row.status).toBe("archived");
+    expect(row.archived_at).not.toBeNull();
+    expect(count("ledger_entries")).toBeGreaterThanOrEqual(ledgerBefore);
+    expect(count("events")).toBeGreaterThanOrEqual(eventsBefore);
+    expect((rig.db.prepare("SELECT COUNT(*) AS n FROM agents WHERE id = ?").get(id) as { n: number }).n).toBe(1);
   });
 });
