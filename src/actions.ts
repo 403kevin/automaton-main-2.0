@@ -33,9 +33,12 @@ export function buildCompletionBody(input: {
   messages: ChatMessage[];
   tools?: unknown[];
   supported?: string[];
+  /** Completion token ceiling. Defaults to 1500 when unset. */
+  maxTokens?: number;
 }): { protocol: ModelProtocol; body: Record<string, unknown> } {
   const tools = input.tools ?? [];
   const protocol = protocolFor(input.supported);
+  const maxTokens = input.maxTokens ?? 1500;
   if (protocol === "tools" && tools.length > 0) {
     return {
       protocol,
@@ -44,12 +47,12 @@ export function buildCompletionBody(input: {
         messages: input.messages,
         tools,
         tool_choice: "auto",
-        max_tokens: 700,
+        max_tokens: maxTokens,
       },
     };
   }
   const messages: ChatMessage[] = [{ role: "system", content: jsonInstruction(tools) }, ...input.messages];
-  const body: Record<string, unknown> = { model: input.model, messages, max_tokens: 700 };
+  const body: Record<string, unknown> = { model: input.model, messages, max_tokens: maxTokens };
   if (supportsJsonObject(input.supported)) body.response_format = { type: "json_object" };
   return { protocol: "json", body };
 }

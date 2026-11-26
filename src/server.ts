@@ -153,6 +153,12 @@ async function handle(
       await swarm.setKillSwitch(Boolean(body.enabled));
       return send(res, 200, { killSwitch: swarm.isKilled() });
     }
+    if (req.method === "POST" && path === "/admin/archive") {
+      const agentId = String(body.agentId ?? "");
+      if (!/^a[a-f0-9]{16}$/.test(agentId)) return send(res, 400, { error: "agentId is required." });
+      await swarm.archiveAgent(agentId, body.reason ? String(body.reason) : "Archived by admin.");
+      return send(res, 200, { ok: true, agentId });
+    }
     if (req.method === "POST" && path === "/admin/clock") {
       const advanced = await swarm.advance(Number(body.advanceMs ?? 0));
       if (!advanced.ok) return send(res, 400, { error: advanced.error });

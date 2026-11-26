@@ -17,7 +17,7 @@ export class InferenceGateway {
     messages: ChatMessage[],
     tools: unknown[],
   ): Promise<
-    | { skipped: true; reason: string }
+    | { skipped: true; reason: string; retryAfterMs?: number }
     | { skipped: false; content: string; toolCalls: ToolCall[]; model: string; costUnits: number }
   > {
     const snapshot = this.swarm.snapshot(agentId);
@@ -26,7 +26,9 @@ export class InferenceGateway {
     if (snapshot.balanceUnits <= 0) return { skipped: true, reason: "Balance is not positive." };
     const ceiling = await this.authorizationCeiling(snapshot.model, tools);
     const allowed = this.swarm.authorize(agentId, ceiling, "inference");
-    if (!allowed.ok) return { skipped: true, reason: allowed.error };
+    if (!allowed.ok) {
+      return { skipped: true, reason: allowed.error, retryAfterMs: allowed.retryAfterMs };
+    }
     let completion;
     try {
       completion = await this.llm.complete({ model: snapshot.model, messages, tools });
@@ -40,12 +42,18 @@ export class InferenceGateway {
     this.swarm.noteServedModel(agentId, completion.model);
     const actual = billable(completion.usage, completion.model, ceiling, this.config.modelPrices);
     const debited = this.swarm.debit(agentId, actual, "inference", `infer:${newId()}`, completion.model);
-    if (!debited.ok) return { skipped: true, reason: debited.error };
-    const toolCalls: ToolCall[] = completion.toolCalls.slice(0, 4).map((call) => ({
-      id: call.id || newId("call"),
-      name: call.name,
-      arguments: parseArgs(call.arguments),
-    }));
+    if (!debited.ok) {
+      return { skipped: true, reason: debited.error, retryAfterMs: debited.retryAfterMs };
+    }
+    const truncated = completion.finishReason === "length";
+    if (truncated) this.swarm.recordInferenceTruncated(agentId, completion.model);
+    const toolCalls: ToolCall[] = truncated
+      ? []
+      : completion.toolCalls.slice(0, 4).map((call) => ({
+          id: call.id || newId("call"),
+          name: call.name,
+          arguments: parseArgs(call.arguments),
+        }));
     return { skipped: false, content: completion.content ?? "", toolCalls, model: completion.model, costUnits: actual };
   }
 

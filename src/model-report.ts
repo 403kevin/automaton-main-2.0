@@ -15,15 +15,20 @@ export function modelReliabilityLines(
   const served = db
     .prepare("SELECT model, COUNT(*) AS n FROM turns WHERE model IS NOT NULL AND created_at >= ? GROUP BY model ORDER BY n DESC, model")
     .all(since) as unknown as Array<{ model: string; n: number }>;
+  const truncated = db
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE kind = 'inference_truncated' AND created_at >= ?")
+    .get(since) as { n: number };
   const lines = ["## Model reliability", ""];
   if (served.length === 0) {
     lines.push("- None in the last day.", "");
+    lines.push(`Truncated (length): ${truncated.n}`, "");
     lines.push(...assignedAndServed(db, since, agents));
     return lines;
   }
   lines.push("Last 24 hours.", "", "### Turns per served model");
   for (const row of served) lines.push(`- ${sanitizeSenseText(row.model)}: ${row.n}`);
   lines.push("");
+  lines.push(`Truncated (length): ${truncated.n}`, "");
   lines.push(...assignedAndServed(db, since, agents));
   return lines;
 }

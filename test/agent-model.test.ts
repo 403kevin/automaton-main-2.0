@@ -426,20 +426,20 @@ describe("the soak template and profile", () => {
     TREASURY_ADDRESS: "0x2222222222222222222222222222222222222222",
     OPENROUTER_API_KEY: "sk-or-test",
   };
-  const MISTRAL = "mistralai/mistral-small-3.2-24b-instruct";
+  const STAGE4 = "deepseek/deepseek-v4.1-flash";
 
   for (const file of ["config/soak.env.template", "config/soak.sepolia.env"]) {
-    it(`${file} uses the Mistral model everywhere and has no Dolphin`, () => {
+    it(`${file} uses the Stage 4 model everywhere and has no Dolphin`, () => {
       const text = fs.readFileSync(file, "utf8");
       expect(text.toLowerCase()).not.toContain("dolphin");
       const env = loadEnvFile(file);
-      expect(env.DEFAULT_MODEL).toBe(MISTRAL);
-      expect(env.LOW_COMPUTE_MODEL).toBe(MISTRAL);
-      expect(env.CRITICAL_MODEL).toBe(MISTRAL);
-      expect(env.COUNCIL_MODELS).toBe(MISTRAL);
+      expect(env.DEFAULT_MODEL).toBe(STAGE4);
+      expect(env.LOW_COMPUTE_MODEL).toBe(STAGE4);
+      expect(env.CRITICAL_MODEL).toBe(STAGE4);
+      expect(env.COUNCIL_MODELS).toBe(STAGE4);
       const config = loadConfig({ ...env, ...SECRETS });
-      expect(config.defaultModel).toBe(MISTRAL);
-      expect(config.councilModels).toEqual([MISTRAL]);
+      expect(config.defaultModel).toBe(STAGE4);
+      expect(config.councilModels).toEqual([STAGE4]);
     });
   }
 
@@ -451,11 +451,14 @@ describe("the soak template and profile", () => {
     expect(() => loadConfig({ ...env, ...SECRETS })).not.toThrow();
   });
 
-  it("prices mistral-nemo, and keeps the two fallback prices", () => {
+  it("prices the five Stage 4 models, and keeps the three fallbacks", () => {
     const config = loadConfig({ ...loadEnvFile("config/soak.env.template"), ...SECRETS });
-    expect(config.modelPrices["mistralai/mistral-nemo"]).toEqual({ promptPerM: 0.029, completionPerM: 0.03 });
-    expect(config.modelPrices["mistralai/mistral-small-3.2-24b-instruct"]).toEqual({ promptPerM: 0.075, completionPerM: 0.2 });
-    expect(config.fallbackModels).toEqual(["mistralai/mistral-small-3.2-24b-instruct", "google/gemini-2.5-flash-lite"]);
+    expect(config.modelPrices["deepseek/deepseek-v4.1-flash"]).toEqual({ promptPerM: 0.0507, completionPerM: 0.2028 });
+    expect(config.modelPrices["z-ai/glm-5.3-flash"]).toEqual({ promptPerM: 0.12, completionPerM: 0.38 });
+    expect(config.modelPrices["openai/gpt-6-luna"]).toEqual({ promptPerM: 0.1, completionPerM: 0.5 });
+    expect(config.modelPrices["minimax/minimax-m3.1-flash"]).toEqual({ promptPerM: 0.075, completionPerM: 0.3 });
+    expect(config.modelPrices["anthropic/claude-haiku-5.5"]).toEqual({ promptPerM: 0.1, completionPerM: 0.5 });
+    expect(config.fallbackModels).toEqual(["deepseek/deepseek-v4.1-flash", "minimax/minimax-m3.1-flash", "anthropic/claude-haiku-5.5"]);
   });
 
   it("has no model id written in src", () => {
