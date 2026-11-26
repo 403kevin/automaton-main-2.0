@@ -24,4 +24,5 @@ await runAgentLoop({
   workspace,
   denyHosts,
   sleepMs: Number(process.env.TURN_INTERVAL_MS ?? 15_000),
+  idleBrakeTurns: Number(process.env.IDLE_BRAKE_TURNS ?? 0),
 });

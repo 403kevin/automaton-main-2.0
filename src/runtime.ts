@@ -99,6 +99,8 @@ export class DockerRuntime implements AgentRuntime {
       `OWNER_DENY_HOSTS=${this.config.denyHosts.join(",")}`,
       "-e",
       `TURN_INTERVAL_MS=${this.config.turnIntervalMs}`,
+      "-e",
+      `IDLE_BRAKE_TURNS=${this.config.idleBrakeTurns}`,
       "-w",
       "/workspace",
     ];

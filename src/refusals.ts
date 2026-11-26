@@ -23,6 +23,7 @@ export const RULE_IDS = [
   "limit.hourly.browse",
   "limit.hourly.claim",
   "limit.hourly.predict",
+  "limit.repeat_search",
   "limit.offer_checks",
   "claim.evidence",
   "claim.shape",

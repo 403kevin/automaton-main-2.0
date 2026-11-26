@@ -108,6 +108,12 @@ export interface AppConfig {
   handlerQueueTimeoutMs: number;
   offerRetestIntervalMs: number;
   offerCheckHourlyLimit: number;
+  /** When false, the static offer_service tool is refused (tool.disabled). Default true. */
+  allowOfferService: boolean;
+  /** An identical web_search by the same agent inside this window is refused before any fee. 0 disables (default). */
+  repeatSearchCooldownMs: number;
+  /** Consecutive served turns with no productive action before the agent loop backs off. 0 disables (default). */
+  idleBrakeTurns: number;
   handlerImage: string;
   toolCosts: Record<string, number>;
 }
@@ -428,6 +434,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     handlerQueueTimeoutMs: atLeast(env.HANDLER_QUEUE_TIMEOUT_MS, 10_000, 1, "HANDLER_QUEUE_TIMEOUT_MS"),
     offerRetestIntervalMs: atLeast(env.OFFER_RETEST_INTERVAL_MS, 21_600_000, 1, "OFFER_RETEST_INTERVAL_MS"),
     offerCheckHourlyLimit: integer(env.OFFER_CHECK_HOURLY_LIMIT, 20, "OFFER_CHECK_HOURLY_LIMIT"),
+    // Unset or empty is true. Anything else is false unless it is exactly "true" (fail closed on a typo).
+    allowOfferService: env.ALLOW_OFFER_SERVICE === undefined || env.ALLOW_OFFER_SERVICE === "" ? true : env.ALLOW_OFFER_SERVICE === "true",
+    repeatSearchCooldownMs: integer(env.REPEAT_SEARCH_COOLDOWN_MS, 0, "REPEAT_SEARCH_COOLDOWN_MS"),
+    idleBrakeTurns: integer(env.IDLE_BRAKE_TURNS, 0, "IDLE_BRAKE_TURNS"),
     handlerImage:
       (env.HANDLER_IMAGE ?? "").trim() || selectHandlerImage(agentImage, env.AGENT_IMAGE_HAS_NODE !== "false"),
     toolCosts: {

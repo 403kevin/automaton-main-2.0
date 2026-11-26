@@ -71,6 +71,7 @@ export async function buildApp(env: NodeJS.ProcessEnv): Promise<AppContext> {
       workspace: spec.workspace,
       denyHosts: config.denyHosts,
       sleepMs: config.turnIntervalMs,
+      idleBrakeTurns: config.idleBrakeTurns,
     });
   });
   swarm.setRuntime(runtime);

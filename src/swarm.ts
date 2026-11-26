@@ -141,6 +141,9 @@ const OFFER_PREVIEW_MAX_CHARS = 2_000;
 /** Consecutive failed re-tests that take a live endpoint off sale. */
 const OFFER_UNPUBLISH_AFTER_FAILURES = 2;
 
+/** The refusal for a static offer_service when ALLOW_OFFER_SERVICE is off. */
+const OFFER_SERVICE_DISABLED = "Static offer_service is disabled; write handler.js and test-publish a paid endpoint with serve_endpoint instead.";
+
 /** Ledger kinds that are money coming in from outside the agent. Each posted credit of these kinds writes one fact. */
 const CREDIT_FACT_KINDS: ReadonlySet<string> = new Set(["owner_topup", "onchain_income", "x402_in", "replication_in"]);
 
@@ -593,7 +596,16 @@ export class Swarm {
       graceUntil: agent.graceUntil,
       recentTurns: turns.map((turn) => turn.content).reverse(),
       ownRecords: ownRecords(this.db, agentId),
+      liveEndpoints: this.liveEndpointCount(agentId),
     };
+  }
+
+  /** Endpoints the agent has on sale. Each passed its test run before it went live. */
+  private liveEndpointCount(agentId: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM endpoints WHERE agent_id = ? AND (status = 'live' OR status IS NULL)")
+      .get(agentId) as { n: number };
+    return row.n;
   }
 
   /** The inference gateway says which model actually answered this agent's wake; the next turn records it. */
@@ -680,6 +692,10 @@ export class Swarm {
       return { ok: true, handled: true, output: "Noted." };
     }
     if (call.name === "offer_service") {
+      if (!this.config.allowOfferService) {
+        this.event(agentId, "offer_service", "outcome=refused cost=0 static offers are disabled");
+        return { ok: false, reason: OFFER_SERVICE_DISABLED, rule: "tool.disabled" };
+      }
       const description = String(args.description ?? "");
       const body = String(args.body ?? "");
       const review = reviewText(`${description}\n${body}`);
@@ -1762,6 +1778,7 @@ export class Swarm {
   private async webSearch(agentId: string, call: ToolCall): Promise<SenseOutcome> {
     const query = String(call.arguments?.query ?? "").trim().slice(0, 300);
     if (!query) return { ok: false, reason: "Query is empty.", rule: "input.invalid" };
+    if (this.isRepeatSearch(agentId, query)) return { ok: false, reason: REPEAT_SEARCH_REASON, rule: "limit.repeat_search" };
     const charged = this.chargeTool(agentId, "web_search", call.id);
     if (!charged.ok) return this.ledgerRefusal(charged);
     try {
@@ -1772,6 +1789,27 @@ export class Swarm {
       const reason = error instanceof Error ? error.message : "Search failed.";
       return { ok: false, reason: reason.slice(0, 300), rule: senseFailureRule(error) };
     }
+  }
+
+  /**
+   * True when the cooldown is on, this agent already ran the same normalized search successfully inside the window, and it
+   * has not published an endpoint or a page since (shipping something is progress, so it earns a fresh search).
+   */
+  private isRepeatSearch(agentId: string, query: string): boolean {
+    const cooldown = this.config.repeatSearchCooldownMs;
+    if (cooldown <= 0) return false;
+    const earlier = this.db
+      .prepare(
+        "SELECT created_at FROM evidence WHERE agent_id = ? AND tool = 'web_search' AND status = 'ok' AND input_hash = ? AND created_at > ? ORDER BY id DESC LIMIT 1",
+      )
+      .get(agentId, webSearchInputHash(query), this.clock.now() - cooldown) as { created_at: number } | undefined;
+    if (!earlier) return false;
+    const shipped = this.db
+      .prepare(
+        "SELECT 1 AS n FROM events WHERE agent_id = ? AND kind IN ('serve_endpoint', 'publish_page') AND message LIKE 'outcome=ok%' AND created_at > ? LIMIT 1",
+      )
+      .get(agentId, earlier.created_at) as { n: number } | undefined;
+    return !shipped;
   }
 
   /**
@@ -1818,7 +1856,7 @@ export class Swarm {
       .run(
         agentId,
         call.name,
-        sha256(JSON.stringify(sorted)),
+        call.name === "web_search" ? webSearchInputHash(String(args.query ?? "").trim().slice(0, 300)) : sha256(JSON.stringify(sorted)),
         row.raw === null ? null : sha256(row.raw),
         target ? target.slice(0, 500) : null,
         row.status,
@@ -2797,6 +2835,19 @@ function senseFailureRule(error: unknown): RuleId {
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
+
+/** A search query with case, repeated spaces and edge spaces removed, so rewording by whitespace does not dodge the repeat brake. */
+function normalizeSearchQuery(query: string): string {
+  return query.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/** The evidence input hash of a web_search. The writer (recordEvidence) and the repeat-search check both use this one function. */
+function webSearchInputHash(query: string): string {
+  return sha256(JSON.stringify({ query: normalizeSearchQuery(query) }));
+}
+
+const REPEAT_SEARCH_REASON =
+  "You already ran this search recently. Read a demand feed with read_feed, inspect /ref (public-apis.md, datasets.rst, SOURCES.md) with read_file, or build something with write_file and serve_endpoint instead.";
 
 async function defaultResolve(host: string): Promise<string[]> {
   if (isPrivateLiteral(host)) return [host];
