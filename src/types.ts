@@ -56,6 +56,8 @@ export interface AgentSnapshot {
   recentTurns: string[];
   /** The agent's own latest facts and claims in one fenced block, or empty. Own rows only. */
   ownRecords?: string;
+  /** How many of the agent's endpoints are live (each passed its test run). Unset means unknown. */
+  liveEndpoints?: number;
 }
 
 export interface ServiceOffer {

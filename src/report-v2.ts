@@ -41,7 +41,8 @@ const COST_KINDS = ["inference", "tool", "council", "rent", "x402_out", "replica
 const COST_MARKS = COST_KINDS.map(() => "?").join(", ");
 const SEARCH_TOOLS = ["web_search"];
 const BROWSE_TOOLS = ["browse"];
-const VIEW_TOOLS = ["see_page", "crawl_site", "read_feed", "fetch_url"];
+const FEED_TOOLS = ["read_feed"];
+const VIEW_TOOLS = ["see_page", "crawl_site", "fetch_url"];
 
 function count(ctx: ReportContext, sql: string, ...params: Array<string | number>): number {
   const row = ctx.db.prepare(sql).get(...params) as { n: number | null } | undefined;
@@ -111,14 +112,21 @@ function breachEvents(ctx: ReportContext): number {
   return count(ctx, "SELECT COUNT(*) AS n FROM events WHERE kind IN ('breach', 'ledger_drift') AND created_at >= ?", ctx.since);
 }
 
-/** Live endpoints whose latest test delivery is missing or not a pass. The offer gate should make this zero. */
+/** The subject a static offer_service's test delivery would carry. No code writes one today, so every static offer is untested. */
+const SERVICE_SUBJECT = "_service";
+
+/**
+ * Offers on sale whose latest test delivery is missing or not a pass: live endpoints (subject = the endpoint name) and static
+ * services rows (subject = `_service`). The offer gate should make the endpoint part zero; a static offer has never been run.
+ */
 function phantomOffers(ctx: ReportContext): number {
   const live = ctx.db.prepare("SELECT agent_id, name FROM endpoints WHERE status = 'live' OR status IS NULL").all() as unknown as Array<{ agent_id: string; name: string }>;
+  const services = ctx.db.prepare("SELECT agent_id, ? AS name FROM services").all(SERVICE_SUBJECT) as unknown as Array<{ agent_id: string; name: string }>;
   let phantom = 0;
-  for (const endpoint of live) {
+  for (const offer of [...live, ...services]) {
     const latest = ctx.db
       .prepare("SELECT value FROM facts WHERE agent_id = ? AND kind = 'test_delivery' AND subject = ? ORDER BY id DESC LIMIT 1")
-      .get(endpoint.agent_id, endpoint.name) as { value: string } | undefined;
+      .get(offer.agent_id, offer.name) as { value: string } | undefined;
     if (!latest || !OK_DELIVERY.test(latest.value)) phantom += 1;
   }
   return phantom;
@@ -321,7 +329,7 @@ export function sensesLines(ctx: ReportContext): string[] {
   const total = (id: string, tools: string[]) => rows.filter((row) => row.agent_id === id && tools.includes(row.tool)).reduce((sum, row) => sum + row.n, 0);
   const entries = ids.map((id) => ({
     name: label(ctx.names.get(id) ?? id),
-    line: `searches ${total(id, SEARCH_TOOLS)}, page views ${total(id, VIEW_TOOLS)}, browse calls ${total(id, BROWSE_TOOLS)}, cost ${formatUsd(costs.find((row) => row.agent_id === id)?.n ?? 0)}`,
+    line: `searches ${total(id, SEARCH_TOOLS)}, feeds ${total(id, FEED_TOOLS)}, page views ${total(id, VIEW_TOOLS)}, browse calls ${total(id, BROWSE_TOOLS)}, cost ${formatUsd(costs.find((row) => row.agent_id === id)?.n ?? 0)}`,
   }));
   entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) lines.push(`- ${entry.name}: ${entry.line}`);
