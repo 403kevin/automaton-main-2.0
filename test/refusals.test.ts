@@ -190,6 +190,12 @@ const CASES: Case[] = [
   },
   { label: "an empty claim", rule: "claim.shape", tool: "claim", act: (box) => run(box, "claim", { statement: "   ", evidence_ids: [] }) },
   {
+    label: "a claim of income the ledger does not show",
+    rule: "claim.contradicts_facts",
+    tool: "claim",
+    act: (box) => run(box, "claim", { statement: "I earned $0.01", evidence_ids: [] }),
+  },
+  {
     label: "an injection claim",
     rule: "claim.tripwire",
     tool: "claim",
