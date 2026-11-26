@@ -61,7 +61,7 @@ Last 24 hours. Counts come from the runtime's own tables, not from anything an a
 - evidence coverage (target at least 95%): 100%: pass
 - lost wakes (target under 5% of turns): 14%: fail
 - breaches (target 0): 0: pass
-- phantom offers published (target 0): 0: pass
+- phantom offers published (target 0): 1: fail
 
 ## Agent said
 
@@ -128,8 +128,8 @@ Last 24 hours, from the ledger. Outside income is the line labelled; the others 
 
 Last 24 hours. Calls are the evidence rows. Cost is what the agent's ledger paid for sense tools.
 
-- mite: searches 0, page views 1, browse calls 0, cost $0.002
-- wick: searches 1, page views 3, browse calls 0, cost $0.006
+- mite: searches 0, feeds 0, page views 1, browse calls 0, cost $0.002
+- wick: searches 1, feeds 0, page views 3, browse calls 0, cost $0.006
 
 ## Lost wakes
 

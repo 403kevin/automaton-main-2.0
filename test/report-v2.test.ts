@@ -234,7 +234,8 @@ describe("the report's sections", () => {
     expect(text).toMatch(/- evidence coverage \(target at least 95%\): .*(pass|fail)/);
     expect(text).toMatch(/- lost wakes \(target under 5% of turns\): .*(pass|fail)/);
     expect(text).toMatch(/- breaches \(target 0\): 0: pass/);
-    expect(text).toMatch(/- phantom offers published \(target 0\): 0: pass/);
+    // The fixture day publishes a static offer_service that no test delivery ever ran, so it counts (BO-4.2).
+    expect(text).toMatch(/- phantom offers published \(target 0\): 1: fail/);
   });
 
   it("makes lost wakes a top-level section with its rate, and takes them out of Model reliability", async () => {
