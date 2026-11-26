@@ -5,7 +5,7 @@ import { parseUsd } from "../src/money.js";
 import { loadEnvFile, SOAK_SEEDS } from "../src/soak.js";
 import { harness } from "./helpers.js";
 
-const SOAK_DEFAULT_MODEL = "mistralai/mistral-small-3.2-24b-instruct";
+const SOAK_DEFAULT_MODEL = "deepseek/deepseek-v4.1-flash";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {

@@ -200,7 +200,7 @@ describe("context window", () => {
     expect(chats).toHaveLength(1);
     const sent = chats[0]?.messages ?? [];
     const maxTokens = chats[0]?.max_tokens ?? 0;
-    expect(maxTokens).toBe(700);
+    expect(maxTokens).toBe(1500);
     expect(estimateMessagesTokens(sent) + maxTokens).toBeLessThanOrEqual(128_000);
     expect(sent.some((message) => message.content === system)).toBe(true);
     expect(sent.some((message) => message.content === CONSTITUTION_TEXT)).toBe(true);
@@ -237,14 +237,14 @@ describe("context window", () => {
 
     const kept = chats[0]?.messages ?? [];
     const trimmed = chats[1]?.messages ?? [];
-    expect(chats[0]?.max_tokens).toBe(700);
+    expect(chats[0]?.max_tokens).toBe(1500);
     expect(kept.some((message) => message.content === small)).toBe(true);
-    expect(estimateMessagesTokens(kept) + 700).toBeLessThanOrEqual(32_000);
+    expect(estimateMessagesTokens(kept) + 1500).toBeLessThanOrEqual(32_000);
     expect(trimmed.some((message) => message.content === system)).toBe(true);
     expect(trimmed.some((message) => message.content === CONSTITUTION_TEXT)).toBe(true);
     expect(JSON.stringify(trimmed)).not.toContain("TOO-BIG");
-    expect(estimateMessagesTokens(trimmed) + 700).toBeLessThanOrEqual(32_000);
-    expect(estimateMessagesTokens([...base, { role: "user", content: big }]) + 700).toBeGreaterThan(32_000);
+    expect(estimateMessagesTokens(trimmed) + 1500).toBeLessThanOrEqual(32_000);
+    expect(estimateMessagesTokens([...base, { role: "user", content: big }]) + 1500).toBeGreaterThan(32_000);
   });
 
   it("caches context length for 24 hours and falls back to 32000", async () => {
