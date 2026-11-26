@@ -28,6 +28,7 @@ export const RULE_IDS = [
   "claim.evidence",
   "claim.shape",
   "claim.tripwire",
+  "claim.contradicts_facts",
   "predict.shape",
   "predict.open_cap",
   "predict.tripwire",

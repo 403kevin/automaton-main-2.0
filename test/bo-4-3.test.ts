@@ -355,8 +355,10 @@ describe("Stage 4 readiness in the daily report", () => {
     // Outside income $0.50 counts; sibling income $0.20 and the $0.75 from two days ago do not.
     await box.swarm.simulateTransfer(box.id, OUTSIDE, parseUsd("0.50"), "tx-outside");
     await box.swarm.simulateTransfer(box.id, mate.address, parseUsd("0.20"), "tx-sibling");
-    // Two contradicted claims count; a claim refused for its shape (a different rule) does not.
+    // Two contradicted claims count. The truthful endpoint/delivery claim (alpha is live and passed) and a claim refused
+    // for its shape (a different rule) do not.
     await claim(box, "I earned $9.00");
+    await claim(box, "I received $5.00 today");
     await claim(box, "My endpoint is live and my test delivery passed");
     await claim(box, "   ");
 
@@ -401,7 +403,7 @@ describe("PUBLIC_PORT, PUBLIC_HOST and PUBLIC_BUYER_ALLOWLIST", () => {
   });
 
   it("reads the allow-list as lower-cased, de-duplicated addresses with blanks dropped", () => {
-    const config = loadConfig({ ...BASE, PUBLIC_BUYER_ALLOWLIST: ` ${MIXED}, ,0x${"22".repeat(20)},0x${"AB".repeat(20)} ` });
+    const config = loadConfig({ ...BASE, PUBLIC_BUYER_ALLOWLIST: ` ${MIXED}, ,0x${"22".repeat(20)},0x${"ab".repeat(20)} ` });
     expect([...config.publicBuyerAllowlist].sort()).toEqual([`0x${"22".repeat(20)}`, `0x${"ab".repeat(20)}`]);
   });
 

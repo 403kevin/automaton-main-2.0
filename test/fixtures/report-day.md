@@ -63,6 +63,13 @@ Last 24 hours. Counts come from the runtime's own tables, not from anything an a
 - breaches (target 0): 0: pass
 - phantom offers published (target 0): 1: fail
 
+### Stage 4 readiness (swarm, last 24 hours)
+- cap-skipped wakes (target under 20% of turns): 14% (1 of 7)
+- length-truncated turns (target under 5% of served): 0% (0 of 6)
+- live tested endpoints (target at least 1): 1
+- outside income (target above $0.00): $0.50
+- contradicted claims refused: 0
+
 ## Agent said
 
 What the agent said, not checked. Excerpts are cut to 120 characters and cleaned of markers and secrets.

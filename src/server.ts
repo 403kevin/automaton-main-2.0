@@ -1,11 +1,11 @@
 import { timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AppConfig } from "./config.js";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { PUBLIC_MAINNET_REFUSAL, type AppConfig } from "./config.js";
 import { dashboardHtml } from "./dashboard.js";
 import { HandlerSandbox, handlerHttpStatus, handlerSnapshotRoot } from "./handlers.js";
 import type { DirectHost } from "./host.js";
 import { formatUsd, parseUsd } from "./money.js";
-import { classifyAgentRoute, renderPageIndex, renderPublishedPage } from "./pages.js";
+import { classifyAgentRoute, renderPageIndex, renderPublishedPage, type AgentRoute } from "./pages.js";
 import { type BrowseLlmProxy, startInternalLlmServer } from "./llm-proxy.js";
 import { caipNetwork, encodeHeaderValue, paymentRequirements, X402_HEADERS } from "./x402.js";
 import type { Swarm } from "./swarm.js";
@@ -14,7 +14,38 @@ import type { ChatMessage, ServedEndpoint, ToolCall } from "./types.js";
 
 export interface ServerHandle {
   url: string;
+  /** The `/a/*`-only listener's address, set only when PUBLIC_PORT is above 0 (specs/BO-4.3). */
+  publicUrl?: string;
   close(): Promise<void>;
+}
+
+/** Decides whether a verified buyer wallet may pay on a listener. Absent means every buyer may. */
+type BuyerGate = (from: string) => boolean;
+
+function listen(server: Server, port: number, host: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+function boundPort(server: Server, fallback: number): number {
+  const address = server.address();
+  return typeof address === "object" && address ? address.port : fallback;
+}
+
+function closeListener(server: Server): Promise<void> {
+  return new Promise((done, fail) => {
+    if (!server.listening) {
+      done();
+      return;
+    }
+    server.closeAllConnections();
+    server.close((error) => (error ? fail(error) : done()));
+  });
 }
 
 export function startServer(input: {
@@ -26,38 +57,51 @@ export function startServer(input: {
   llmProxy?: BrowseLlmProxy;
 }): Promise<ServerHandle> {
   const { config, swarm, host } = input;
+  // The public listener is for Base Sepolia test-buys only; a hand-built config gets the same refusal as loadConfig.
+  if (config.publicPort > 0 && config.allowMainnet) return Promise.reject(new Error(PUBLIC_MAINNET_REFUSAL));
   const handlers = input.handlers ?? defaultHandlers(config);
+  const fail500 = (res: ServerResponse, error: unknown) => {
+    const message = redact(error instanceof Error ? error.message : "Request failed.");
+    send(res, 500, { error: message });
+  };
   const server = createServer((req, res) => {
-    void handle(req, res, config, swarm, host, handlers).catch((error) => {
-      const message = redact(error instanceof Error ? error.message : "Request failed.");
-      send(res, 500, { error: message });
-    });
+    void handle(req, res, config, swarm, host, handlers).catch((error) => fail500(res, error));
   });
+  const gate: BuyerGate | undefined =
+    config.publicBuyerAllowlist.size > 0 ? (from) => config.publicBuyerAllowlist.has(from.toLowerCase()) : undefined;
+  const publicServer =
+    config.publicPort > 0
+      ? createServer((req, res) => {
+          void handlePublic(req, res, config, swarm, handlers, gate).catch((error) => fail500(res, error));
+        })
+      : null;
   const internalReady = input.llmProxy
     ? startInternalLlmServer(input.llmProxy, config.internalLlmPort, config.internalLlmHost)
     : Promise.resolve(null);
   return internalReady.then(
-    (internal) =>
-      new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(config.port, config.host, () => {
+    async (internal) => {
+      try {
+        await listen(server, config.port, config.host);
+        if (publicServer) await listen(publicServer, config.publicPort, config.publicHost);
+      } catch (error) {
+        await Promise.allSettled([closeListener(server), publicServer ? closeListener(publicServer) : Promise.resolve(), internal?.close()]);
+        throw error;
+      }
       if (input.background !== false) {
         swarm.startScheduler();
         swarm.startReports();
         void swarm.resumeLiving();
       }
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : config.port;
-      const hostName = config.host === "0.0.0.0" ? "127.0.0.1" : config.host;
-      resolve({
-        url: `http://${hostName}:${port}`,
+      const origin = (bindHost: string, port: number) => `http://${bindHost === "0.0.0.0" ? "127.0.0.1" : bindHost}:${port}`;
+      const started: ServerHandle = {
+        url: origin(config.host, boundPort(server, config.port)),
         close: () =>
-          new Promise((done, fail) => {
+          new Promise((done, failClose) => {
             void handlers.shutdown().finally(() => {
               void swarm.haltBodies().finally(() => {
                 const finish = () => {
-                  server.closeAllConnections();
-                  server.close((error) => (error ? fail(error) : done()));
+                  const closing = [closeListener(server), publicServer ? closeListener(publicServer) : Promise.resolve()];
+                  void Promise.all(closing).then(() => done(), failClose);
                 };
                 if (!internal) {
                   finish();
@@ -67,9 +111,10 @@ export function startServer(input: {
               });
             });
           }),
-      });
-    });
-  }),
+      };
+      if (publicServer) started.publicUrl = origin(config.publicHost, boundPort(publicServer, config.publicPort));
+      return started;
+    },
     (error) => {
       server.close();
       return Promise.reject(error);
@@ -107,18 +152,7 @@ async function handle(
   if (req.method === "GET" && path === "/api/overview") return send(res, 200, swarm.overview());
 
   const agentRoute = classifyAgentRoute(path);
-  if (agentRoute.kind === "refuse") return send(res, 400, { error: "Path is refused." });
-  if (agentRoute.kind === "legacy") {
-    if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
-    return servePaid(req, res, config, swarm, agentRoute.agentId);
-  }
-  if (agentRoute.kind === "index") {
-    if (req.method !== "GET") return send(res, 405, { error: "Method not allowed." });
-    return servePageIndex(res, swarm, agentRoute.agentId);
-  }
-  if (agentRoute.kind === "name") {
-    return serveNamed(req, res, config, swarm, handlers, agentRoute.agentId, agentRoute.name);
-  }
+  if (agentRoute.kind !== "no") return serveAgentRoute(req, res, agentRoute, config, swarm, handlers, undefined);
 
   if (path.startsWith("/admin/")) {
     if (!adminOk(req, config.adminToken)) return send(res, 401, { error: "Admin token rejected." });
@@ -211,7 +245,55 @@ async function handle(
   send(res, 404, { error: "Not found." });
 }
 
-async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppConfig, swarm: Swarm, agentId: string): Promise<void> {
+/**
+ * The public listener (specs/BO-4.3): only the agent routes, served by the same code as on the main listener. Every other
+ * path is a plain 404, decided before any other route is considered.
+ */
+async function handlePublic(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  swarm: Swarm,
+  handlers: HandlerSandbox,
+  gate: BuyerGate | undefined,
+): Promise<void> {
+  const path = (req.url ?? "/").split("?")[0] || "/";
+  const agentRoute = classifyAgentRoute(path);
+  if (agentRoute.kind === "no") return send(res, 404, { error: "Not found." });
+  return serveAgentRoute(req, res, agentRoute, config, swarm, handlers, gate);
+}
+
+const NOT_ALLOWLISTED = "Buyer wallet is not allowlisted for this testnet test.";
+
+async function serveAgentRoute(
+  req: IncomingMessage,
+  res: ServerResponse,
+  route: Exclude<AgentRoute, { kind: "no" }>,
+  config: AppConfig,
+  swarm: Swarm,
+  handlers: HandlerSandbox,
+  gate: BuyerGate | undefined,
+): Promise<void> {
+  if (route.kind === "refuse") return send(res, 400, { error: "Path is refused." });
+  if (route.kind === "legacy") {
+    if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
+    return servePaid(req, res, config, swarm, route.agentId, gate);
+  }
+  if (route.kind === "index") {
+    if (req.method !== "GET") return send(res, 405, { error: "Method not allowed." });
+    return servePageIndex(res, swarm, route.agentId);
+  }
+  return serveNamed(req, res, config, swarm, handlers, route.agentId, route.name, gate);
+}
+
+async function servePaid(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: AppConfig,
+  swarm: Swarm,
+  agentId: string,
+  gate: BuyerGate | undefined,
+): Promise<void> {
   const service = swarm.service(agentId);
   const snapshot = swarm.overview().agents.find((agent) => agent.id === agentId);
   if (!service || !snapshot) return send(res, 404, { error: "No paid service is offered here." });
@@ -228,16 +310,35 @@ async function servePaid(req: IncomingMessage, res: ServerResponse, config: AppC
     writePaymentRequired(res, challenge);
     return;
   }
-  const settled = await swarm.settleDryPayment(agentId, payment);
-  if (!settled.ok) return send(res, 402, { error: settled.error });
-  const receipt = { success: true, transaction: settled.value.txHash ?? "", network: caipNetwork(config) };
+  let body = "";
+  let txHash: string | undefined;
+  if (!gate) {
+    const settled = await swarm.settleDryPayment(agentId, payment);
+    if (!settled.ok) return send(res, 402, { error: settled.error });
+    body = settled.value.body;
+    txHash = settled.value.txHash;
+  } else {
+    // The allow-list must sit between verify and commit, so the single settle call is split here (same steps as settleDryPayment).
+    const verified = await swarm.verifyInboundPayment(agentId, payment, service.priceUnits);
+    if (!verified.ok) return send(res, 402, { error: verified.error });
+    try {
+      if (!gate(verified.value.from)) return send(res, 403, { error: NOT_ALLOWLISTED });
+      const settled = await swarm.commitInboundPayment(agentId, verified.value);
+      if (!settled.ok) return send(res, 402, { error: settled.error });
+      body = service.body;
+      txHash = settled.value.txHash;
+    } finally {
+      swarm.releaseInboundPayment(verified.value.nonce);
+    }
+  }
+  const receipt = { success: true, transaction: txHash ?? "", network: caipNetwork(config) };
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8",
     [X402_HEADERS.response]: encodeHeaderValue(receipt),
     "Access-Control-Expose-Headers": `${X402_HEADERS.required}, ${X402_HEADERS.response}`,
     "X-Automaton-Disclosure": "This response was produced by an AI agent, not a human.",
   });
-  res.end(settled.value.body);
+  res.end(body);
 }
 
 function servePageIndex(res: ServerResponse, swarm: Swarm, agentId: string): void {
@@ -263,6 +364,7 @@ async function serveNamed(
   handlers: HandlerSandbox,
   agentId: string,
   name: string,
+  gate: BuyerGate | undefined,
 ): Promise<void> {
   let walletAddress = "";
   let status = "";
@@ -281,7 +383,7 @@ async function serveNamed(
       return send(res, 404, { error: "No paid endpoint is offered here." });
     }
     if (req.method !== "GET" && req.method !== "POST") return send(res, 405, { error: "Method not allowed." });
-    return serveEndpoint(req, res, config, swarm, handlers, agentId, name, walletAddress, endpoint);
+    return serveEndpoint(req, res, config, swarm, handlers, agentId, name, walletAddress, endpoint, gate);
   }
   if (req.method !== "GET") return send(res, 405, { error: "Method not allowed." });
   const page = swarm.page(agentId, name);
@@ -299,6 +401,7 @@ async function serveEndpoint(
   name: string,
   walletAddress: string,
   endpoint: ServedEndpoint,
+  gate: BuyerGate | undefined,
 ): Promise<void> {
   const body = await readRaw(req, 64 * 1024);
   if (!body.ok) return send(res, 413, { error: body.error });
@@ -317,6 +420,11 @@ async function serveEndpoint(
   }
   const verified = await swarm.verifyInboundPayment(agentId, payment, endpoint.priceUnits);
   if (!verified.ok) return send(res, 402, { error: verified.error });
+  if (gate && !gate(verified.value.from)) {
+    // Before the handler runs and before any money moves. The held nonce is pending only, so it is dropped.
+    swarm.releaseInboundPayment(verified.value.nonce);
+    return send(res, 403, { error: NOT_ALLOWLISTED });
+  }
   const url = new URL(req.url ?? "/", "http://localhost");
   const query: Record<string, string> = {};
   for (const [key, value] of url.searchParams) {

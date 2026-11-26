@@ -35,6 +35,8 @@ const REASON_CHARS = 80;
 const CLAIMS_SHOWN = 3;
 const COVERAGE_TARGET_PERCENT = 95;
 const LOST_WAKE_TARGET_PERCENT = 5;
+const CAP_SKIPPED_TARGET_PERCENT = 20;
+const TRUNCATED_TARGET_PERCENT = 5;
 const SENSE_LIST = [...SENSE_TOOLS];
 const SENSE_MARKS = SENSE_LIST.map(() => "?").join(", ");
 const COST_KINDS = ["inference", "tool", "council", "rent", "x402_out", "replication_out"];
@@ -173,8 +175,48 @@ export function runtimeObservedLines(ctx: ReportContext): string[] {
     `- breaches (target 0): ${breaches}: ${verdict(breaches === 0)}`,
     `- phantom offers published (target 0): ${phantom}: ${verdict(phantom === 0)}`,
     "",
+    ...stage4ReadinessLines(ctx, swarm.turns),
   );
   return lines;
+}
+
+/** Live endpoints whose latest test delivery (subject = the endpoint name) passed. */
+function liveTestedEndpoints(ctx: ReportContext): number {
+  const live = ctx.db.prepare("SELECT agent_id, name FROM endpoints WHERE status = 'live' OR status IS NULL").all() as unknown as Array<{ agent_id: string; name: string }>;
+  let tested = 0;
+  for (const endpoint of live) {
+    const latest = ctx.db
+      .prepare("SELECT value FROM facts WHERE agent_id = ? AND kind = 'test_delivery' AND subject = ? ORDER BY id DESC LIMIT 1")
+      .get(endpoint.agent_id, endpoint.name) as { value: string } | undefined;
+    if (latest && OK_DELIVERY.test(latest.value)) tested += 1;
+  }
+  return tested;
+}
+
+/** The Stage 4 exit numbers (specs/BO-4.3-honesty-public-a.md), from runtime tables over the same window as Stage 3. No verdicts. */
+function stage4ReadinessLines(ctx: ReportContext, turns: number): string[] {
+  const skipped = count(ctx, "SELECT COUNT(*) AS n FROM turns WHERE content LIKE 'Inference skipped:%' AND created_at >= ?", ctx.since);
+  const served = count(ctx, "SELECT COUNT(*) AS n FROM turns WHERE model IS NOT NULL AND created_at >= ?", ctx.since);
+  const truncated = count(ctx, "SELECT COUNT(*) AS n FROM events WHERE kind = 'inference_truncated' AND created_at >= ?", ctx.since);
+  const outside = count(
+    ctx,
+    "SELECT COALESCE(SUM(amount_units), 0) AS n FROM ledger_entries WHERE kind IN ('onchain_income', 'x402_in') AND amount_units > 0 AND (payer_class IS NULL OR payer_class != 'sibling') AND created_at >= ?",
+    ctx.since,
+  );
+  const contradicted = count(
+    ctx,
+    "SELECT COUNT(*) AS n FROM refusals WHERE rule_id = 'claim.contradicts_facts' AND source = 'runtime' AND created_at >= ?",
+    ctx.since,
+  );
+  return [
+    "### Stage 4 readiness (swarm, last 24 hours)",
+    `- cap-skipped wakes (target under ${CAP_SKIPPED_TARGET_PERCENT}% of turns): ${percent(skipped, turns)} (${skipped} of ${turns})`,
+    `- length-truncated turns (target under ${TRUNCATED_TARGET_PERCENT}% of served): ${percent(truncated, served)} (${truncated} of ${served})`,
+    `- live tested endpoints (target at least 1): ${liveTestedEndpoints(ctx)}`,
+    `- outside income (target above $0.00): ${formatUsd(outside)}`,
+    `- contradicted claims refused: ${contradicted}`,
+    "",
+  ];
 }
 
 export function agentSaidLines(ctx: ReportContext): string[] {
