@@ -129,7 +129,7 @@ describe("compose forwarding", () => {
 
   it("gives no secret a default value in any compose file", () => {
     const offenders: string[] = [];
-    for (const file of ["docker-compose.yml", "docker-compose.safe.yml", "docker-compose.soak.yml"]) {
+    for (const file of ["docker-compose.yml", "docker-compose.safe.yml", "docker-compose.soak.yml", "docker-compose.public-a.yml"]) {
       for (const line of read(file).split("\n")) {
         const match = /^\s+([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET)):\s*(.*)$/.exec(line);
         if (!match) continue;

@@ -14,6 +14,11 @@ export type LlmMode = "mock" | "openrouter";
 export interface AppConfig {
   host: string;
   port: number;
+  /** Port of the second, `/a/*`-only listener (specs/BO-4.3). 0 (default) opens none. Refused when mainnet is allowed. */
+  publicPort: number;
+  publicHost: string;
+  /** Lower-cased wallets allowed to pay on the public listener. Empty (default) allows any buyer. */
+  publicBuyerAllowlist: Set<string>;
   dataDir: string;
   moneyMode: MoneyMode;
   network: NetworkName;
@@ -164,6 +169,23 @@ function parseFallbackModels(raw: string | undefined): string[] {
   return models;
 }
 
+/** PUBLIC_BUYER_ALLOWLIST: comma-separated EVM addresses, lower-cased and de-duplicated. A malformed entry stops start-up. */
+function parseBuyerAllowlist(raw: string | undefined): Set<string> {
+  const wallets = new Set<string>();
+  for (const item of (raw ?? "").split(",")) {
+    const wallet = item.trim();
+    if (!wallet) continue;
+    if (!isAddress(wallet)) {
+      throw new Error(`PUBLIC_BUYER_ALLOWLIST entry "${wallet.slice(0, 50)}" is not an Ethereum address.`);
+    }
+    wallets.add(wallet.toLowerCase());
+  }
+  return wallets;
+}
+
+/** The public `/a/*` listener serves Base Sepolia test-buys only. */
+export const PUBLIC_MAINNET_REFUSAL = "Refusing PUBLIC_PORT above 0 while ALLOW_MAINNET=true: the public /a/* listener is for Base Sepolia test-buys only.";
+
 /** The refusal for a model that is not on ALLOWED_MODELS. One wording, used by the swarm, the admin route and the seeding. */
 export function notAllowedModel(model: string): string {
   return `Model ${model.slice(0, 100)} is not on the allowed models list.`;
@@ -257,6 +279,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   if (network === "base" && !allowMainnet) {
     throw new Error("Refusing Base mainnet. Set NETWORK=base and ALLOW_MAINNET=true together.");
   }
+  const publicPort = integer(env.PUBLIC_PORT, 0, "PUBLIC_PORT");
+  if (publicPort > 0 && allowMainnet) throw new Error(PUBLIC_MAINNET_REFUSAL);
   const moneyMode: MoneyMode = env.MONEY_MODE === "live" ? "live" : "dry-run";
   if (moneyMode === "live" && network === "base" && !allowMainnet) {
     throw new Error("Refusing live mainnet money without ALLOW_MAINNET=true.");
@@ -337,6 +361,9 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   return {
     host: env.HOST ?? "0.0.0.0",
     port: integer(env.PORT, 4747, "PORT"),
+    publicPort,
+    publicHost: (env.PUBLIC_HOST ?? "").trim() || "0.0.0.0",
+    publicBuyerAllowlist: parseBuyerAllowlist(env.PUBLIC_BUYER_ALLOWLIST),
     dataDir: env.DATA_DIR ?? "data",
     moneyMode,
     network,

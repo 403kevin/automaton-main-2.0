@@ -238,6 +238,22 @@ describe("the report's sections", () => {
     expect(text).toMatch(/- phantom offers published \(target 0\): 1: fail/);
   });
 
+  it("gives the five Stage 4 readiness numbers directly under the Stage 3 exit numbers", async () => {
+    const { box } = await fixtureDay();
+    const lines = section(box.swarm.writeDailyReport().markdown, "Runtime observed").split("\n");
+    const stage4 = lines.indexOf("### Stage 4 readiness (swarm, last 24 hours)");
+    expect(stage4).toBe(lines.indexOf("### Stage 3 exit numbers (swarm, last 24 hours)") + 6);
+    // Seven turns today: one skipped for a model failure, six served (3 on NEMO, 3 on the default). Echo is the one live,
+    // tested endpoint. Outside income is the $0.50 transfer; the $0.20 sibling transfer is left out. No claim was contradicted.
+    expect(lines.slice(stage4 + 1, stage4 + 6)).toEqual([
+      "- cap-skipped wakes (target under 20% of turns): 14% (1 of 7)",
+      "- length-truncated turns (target under 5% of served): 0% (0 of 6)",
+      "- live tested endpoints (target at least 1): 1",
+      "- outside income (target above $0.00): $0.50",
+      "- contradicted claims refused: 0",
+    ]);
+  });
+
   it("makes lost wakes a top-level section with its rate, and takes them out of Model reliability", async () => {
     const { box, w } = await fixtureDay();
     const markdown = box.swarm.writeDailyReport().markdown;

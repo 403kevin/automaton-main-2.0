@@ -1,0 +1,10 @@
+# Optional, opt-in. Publishes only the /a/* listener (PUBLIC_PORT=4748) for the Stage 4 Base Sepolia test-buy (BO-4.4).
+# Add it last, after docker-compose.safe.yml. Compose appends this port to the safe file's loopback 4747 mapping,
+# so the dashboard, /api/*, /admin/* and /internal/* stay on 127.0.0.1:4747. No secrets and no defaults live here:
+# the allow-list (PUBLIC_BUYER_ALLOWLIST) and everything else come from .env.soak.
+#   docker compose -f docker-compose.yml -f docker-compose.soak.yml -f docker-compose.safe.yml -f docker-compose.public-a.yml --env-file .env.soak up -d
+
+services:
+  orchestrator:
+    ports:
+      - "4748:4748"

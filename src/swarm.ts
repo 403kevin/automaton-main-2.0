@@ -1703,7 +1703,8 @@ export class Swarm {
 
   /**
    * The claim tool (specs/BO-2.1b-claim-facts.md). Checked in order: hourly limit, statement shape, constitution,
-   * tripwires, evidence ids, then the fee. Nothing is charged or stored until every check passes. A rejected claim is
+   * tripwires, evidence ids, the ledger/endpoint/fact honesty check (claim.contradicts_facts, specs/BO-4.3), then the fee.
+   * Nothing is charged or stored until every check passes. A rejected claim is
    * logged as claim_rejected, which counts toward the hourly limit; a limit refusal is logged as claim_limit, which does not.
    */
   private claimTool(agentId: string, call: ToolCall): ToolResult {
